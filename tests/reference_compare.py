@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from markdown_it import MarkdownIt  # noqa: E402
 
-from dreamdocs.markdown import normalize_newlines, parse, squash  # noqa: E402
+from dreamdocs.markdown import join_lines, normalize_newlines, parse, squash  # noqa: E402
 
 MD = MarkdownIt("commonmark").enable("table")
 
@@ -41,7 +41,7 @@ def reference(src: str) -> list[tuple]:
             row = None
         elif token.type == "inline":
             parent = tokens[n - 1].type
-            text = squash(token.content)
+            text = squash(join_lines(line.strip() for line in token.content.split("\n")))
             if parent in ("th_open", "td_open"):
                 row[1].append(text)
             elif parent == "heading_open":
@@ -54,7 +54,8 @@ def reference(src: str) -> list[tuple]:
                 # lone <a id> anchor line are skeleton, not prose.
                 alert = re.match(r"^\[![A-Za-z]+\]\s*", token.content)
                 if kind == "q" and alert and "\n" in token.content[:alert.end() + 1]:
-                    text, line = squash(token.content[alert.end():]), line + 1
+                    rest = token.content[alert.end():]
+                    text, line = squash(join_lines(part.strip() for part in rest.split("\n"))), line + 1
                 if re.fullmatch(r'<a (?:id|name)="[^"<>]*"></a>', text):
                     continue
                 if text:

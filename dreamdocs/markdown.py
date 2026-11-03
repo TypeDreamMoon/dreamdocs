@@ -78,15 +78,18 @@ class Doc:
     src: str
     slots: list[Slot] = field(default_factory=list)
 
-    def render(self, values: dict[int, list[str]] | None = None) -> str:
-        """Rebuild the page; values maps a slot index to replacement text per span."""
-        edits = []
+    def render(self, values: dict[int, list[str]] | None = None, inserts: dict[int, str] | None = None) -> str:
+        """Rebuild the page; values maps a slot index to replacement text per span.
+
+        inserts adds skeleton text at source offsets (before any slot starting there).
+        """
+        edits = [((at, at), text) for at, text in (inserts or {}).items()]
         for index, slot in enumerate(self.slots):
             replaced = (values or {}).get(index)
             for n, span in enumerate(slot.spans):
                 if replaced is not None:
                     edits.append((span, replaced[n]))
-        edits.sort(key=lambda e: e[0])
+        edits.sort(key=lambda e: (e[0][0], e[0][1] != e[0][0]))
         out, pos = [], 0
         for (start, end), text in edits:
             out.append(self.src[pos:start])
@@ -127,6 +130,19 @@ def escape(slot: Slot, text: str) -> str:
     if slot.kind == "h" and not slot.setext:
         text = re.sub(r"([ \t])(#+)[ \t]*$", lambda m: m[1] + "\\" + m[2], text)
     return text
+
+
+_CJK = re.compile(r"[⺀-鿿가-힯豈-﫿︰-﹏＀-￯　-〿]")
+
+
+def join_lines(lines) -> str:
+    """Join wrapped source lines: a space, except where both sides are CJK (Chinese is not spaced)."""
+    out = ""
+    for line in lines:
+        if out and line and not (_CJK.match(out[-1]) and _CJK.match(line[0])):
+            out += " "
+        out += line
+    return out
 
 
 def digest(text: str) -> str:
@@ -307,7 +323,7 @@ class _Parser:
         first, last = self.text(para[0]), self.text(para[-1])
         start = para[0][0] + indent(first)
         end = para[-1][1] - (len(last) - len(last.rstrip()))
-        text = " ".join(self.text(line).strip() for line in para)
+        text = join_lines(self.text(line).strip() for line in para)
         self.slots.append(Slot(kind, [(start, end)], [text], level=level, setext=kind == "h"))
 
     def _cells(self, line) -> list[tuple[int, int]]:
