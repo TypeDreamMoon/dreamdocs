@@ -15,5 +15,8 @@ dreamdocs = "dreamdocs.cli:main"
 [tool.setuptools]
 packages = ["dreamdocs"]
 
+[tool.setuptools.package-data]
+dreamdocs = ["prompts/*.md", "glossary/*.json"]
+
 [tool.setuptools.dynamic]
 version = { attr = "dreamdocs.__version__" }

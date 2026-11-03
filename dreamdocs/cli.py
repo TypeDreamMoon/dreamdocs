@@ -40,9 +40,13 @@ def _migrate(args) -> int:
     from .plugin import Plugin
     results = []
     for root in args.plugin:
-        result = migrate(Plugin.open(root))
+        plugin = Plugin.open(root)
+        result = migrate(plugin)
         results.append(result)
-        if args.out:
+        if args.write:
+            count = write_tables(result, plugin.mirror / ".align")
+            print(f"{result.name}: {count} alignment tables written to {plugin.mirror / '.align'}", file=sys.stderr)
+        elif args.out:
             count = write_tables(result, Path(args.out) / result.name)
             print(f"{result.name}: {count} alignment tables written to {Path(args.out) / result.name}", file=sys.stderr)
     text, data = summarize(results)
@@ -81,6 +85,73 @@ def _status(args) -> int:
     return 0
 
 
+def _profiles(args) -> int:
+    from . import profiles
+    found, warnings = profiles.load()
+    print(f"{profiles.user_file()}{'' if profiles.user_file().exists() else ' (not found)'}")
+    for line in warnings:
+        print(f"  warning: {line}")
+    for profile in found.values():
+        key = "key set" if profile.key() else "no key"
+        usable = "" if profile.type in profiles.TYPES.values() else " (machine translator: DreamLoc only)"
+        print(f"  {profile.describe()}, {key}{usable}")
+    return 0
+
+
+def _translate(args) -> int:
+    from . import translate
+    from .cache import Cache
+    from .plugin import Plugin
+    from .profiles import choose
+    from .providers import Client
+    plugin = Plugin.open(args.plugin)
+    profile = choose(args.profile, plugin.config.get("profile"))
+    if args.model:
+        profile.model = args.model
+    if args.concurrency:
+        profile.concurrency = args.concurrency
+    cache = Cache(enabled=not args.no_cache)
+    pages = plugin.pages()
+    if args.page:
+        unknown = sorted(set(args.page) - set(pages))
+        if unknown:
+            raise ValueError(f"not an English manual of this plugin: {', '.join(unknown)} (paths are relative to Docs/)")
+        pages = [p for p in pages if p in args.page]
+    plans, jobs = translate.plan(plugin, pages, cache, profile.model, reuse=not args.no_reuse, rebuild=args.rebuild)
+    client = Client(profile, cache)
+    est = translate.estimate(plans, jobs, profile, client if profile.type == "OpenCodeGo" else None,
+                             translate.system_prompt(plugin))
+    todo = est.jobs - est.cached
+    if args.limit is not None:
+        todo = min(todo, args.limit)
+    print(f"{profile.describe()}")
+    print(f"{est.pages} pages to write; {est.jobs} slots to translate ({est.cached} already cached), "
+          f"{est.reused} copied from identical English elsewhere")
+    if todo:
+        cost = f", about ${est.cost:.2f}" if est.cost is not None else ""
+        print(f"to send: {todo} slots, {est.chars:,} characters in about {est.requests} requests "
+              f"(~{est.input_tokens:,} input / ~{est.output_tokens:,} output tokens{cost})")
+    for p in plans:
+        if p.note:
+            print(f"  skipped {p.page}: {p.note}")
+    if args.dry_run:
+        return 0
+    if todo and not args.yes and not translate.confirm(f"send {todo} slots to {profile.name}?"):
+        return 1
+    summary = translate.run(plugin, profile, plans, jobs, client, cache, args.limit,
+                            log=lambda line: print(line, file=sys.stderr))
+    print(f"wrote {len(summary.written)} pages; {summary.sent} slots translated, {summary.cached} from the cache, "
+          f"{summary.reused} copied; {client.requests} requests, {client.input_tokens:,} input / "
+          f"{client.output_tokens:,} output tokens")
+    for page, left in summary.unfinished:
+        print(f"  not written {page}: {left} slots still untranslated")
+    for line in summary.failures[:20]:
+        print(f"  failed {line}")
+    if summary.stopped:
+        print(f"stopped: {summary.stopped}")
+    return 1 if summary.unfinished or summary.stopped else 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="dreamdocs", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -98,6 +169,7 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("migrate", help="line old per-page translation records up slot by slot (report only)")
     p.add_argument("--plugin", action="append", required=True, help="plugin root; repeat for several plugins")
+    p.add_argument("--write", action="store_true", help="write the tables into each plugin's Docs/<lang>/.align")
     p.add_argument("--out", help="write the alignment tables under this folder, one subfolder per plugin")
     p.add_argument("--report", help="write the Markdown report here instead of printing it")
     p.add_argument("--json", help="write per-page numbers here")
@@ -108,6 +180,23 @@ def main(argv=None) -> int:
     p.add_argument("--align-dir", help="read alignment tables from here instead of Docs/<lang>/.align")
     p.add_argument("--json", action="store_true")
     p.set_defaults(run=_status)
+
+    p = sub.add_parser("translate", help="translate stale and missing slots and rebuild the translated pages")
+    p.add_argument("--plugin", default=".")
+    p.add_argument("--page", action="append", help="English page relative to Docs/ (repeatable); default: all")
+    p.add_argument("--profile", help="translator profile name (see dreamdocs profiles)")
+    p.add_argument("--model", help="use this model instead of the profile's")
+    p.add_argument("--limit", type=int, help="send at most this many slots")
+    p.add_argument("--concurrency", type=int)
+    p.add_argument("--dry-run", action="store_true", help="only show what would be sent")
+    p.add_argument("--yes", action="store_true", help="send without asking")
+    p.add_argument("--no-reuse", action="store_true", help="translate identical English again instead of copying")
+    p.add_argument("--no-cache", action="store_true")
+    p.add_argument("--rebuild", action="store_true", help="rewrite every translated page from today's English layout")
+    p.set_defaults(run=_translate)
+
+    p = sub.add_parser("profiles", help="list the translator profiles dreamdocs can use")
+    p.set_defaults(run=_profiles)
 
     args = parser.parse_args(argv)
     try:

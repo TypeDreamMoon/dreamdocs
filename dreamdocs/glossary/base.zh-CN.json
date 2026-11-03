@@ -1,0 +1,20 @@
+{
+  "Blueprint": "蓝图",
+  "Material": "材质",
+  "Material Instance": "材质实例",
+  "Material Function": "材质函数",
+  "Emitter": "发射器",
+  "Widget": "控件",
+  "Canvas": "画布",
+  "compile": "编译",
+  "compiler": "编译器",
+  "diagnostic": "诊断",
+  "Unreal Engine": "Unreal Engine",
+  "Niagara": "Niagara",
+  "Substrate": "Substrate",
+  "DreamShader": "DreamShader",
+  "DreamFX": "DreamFX",
+  "DreamGUI": "DreamGUI",
+  "DreamNarrative": "DreamNarrative",
+  "DreamLoc": "DreamLoc"
+}

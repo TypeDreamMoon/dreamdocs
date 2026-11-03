@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import inline
 from .align import Alignment, Comparison, Row, SlotState, compare, translatable
-from .markdown import Doc, parse, squash
+from .markdown import Doc, digest, parse, squash
 from .plugin import Plugin, read
 
 
@@ -88,6 +88,8 @@ def migrate_page(plugin: Plugin, page: str) -> PageResult:
     table = Alignment(f"Docs/{page}", rev[:12])
     if record.get("model"):
         table.extra["model"] = record["model"]
+    if verified:
+        table.extra["page"] = digest(source.src)[:12]  # The English page this translation was laid out from.
     for j, slot in enumerate(translated.slots):
         i = pairs.get(j)
         if i is None:

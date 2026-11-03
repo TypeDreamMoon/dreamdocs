@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .align import Alignment, Comparison, compare
-from .markdown import parse
+from .markdown import digest, parse
 from .migrate import untranslated
 from .plugin import Plugin, read
 
@@ -26,13 +26,18 @@ def page_status(plugin: Plugin, page: str, tables: Path | None = None) -> PageSt
         return PageStatus(page, "missing", untranslated(english))
     if not table_path.exists():
         return PageStatus(page, "untracked", detail="no alignment table; run dreamdocs migrate")
-    result = compare(Alignment.read(table_path), english, parse(read(zh)))
+    table = Alignment.read(table_path)
+    result = compare(table, english, parse(read(zh)))
     if result.mismatch:
         return PageStatus(page, "mismatch", result, result.mismatch)
     state = "current" if all(s.state in ("current", "skip") for s in result.states) else "outdated"
+    detail = ""
+    if state == "current" and table.extra.get("page") != digest(english.src)[:12]:
+        # Every slot is current but code, tables or layout around them changed: rebuild, nothing to translate.
+        state, detail = "outdated", "layout changed; dreamdocs translate rebuilds it without sending anything"
     if page in plugin.manual and state != "current":
         state = "manual"
-    return PageStatus(page, state, result)
+    return PageStatus(page, state, result, detail)
 
 
 def plugin_status(plugin: Plugin, tables: Path | None = None) -> list[PageStatus]:
