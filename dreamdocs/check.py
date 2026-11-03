@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +45,75 @@ class Report:
     files: int = 0
     slots: int = 0
     failures: dict[str, list[str]] = field(default_factory=dict)
+
+
+_LINK = re.compile(r"\]\(<?([^\s)>]+)>?(?:\s+\"[^\"]*\")?\)")
+
+
+def _broken_links(path: Path, text: str) -> list[str]:
+    """Relative links in a page that point at no file (fragments and queries are not checked)."""
+    from .links import _outside_code
+    found = []
+
+    def scan(segment: str) -> str:
+        for m in _LINK.finditer(segment):
+            url = m[1]
+            if re.match(r"^(?:[a-zA-Z][\w+.-]*:|//|/|#)", url):
+                continue
+            target = (path.parent / urllib.parse.unquote(url.split("#", 1)[0].split("?", 1)[0])).resolve()
+            if not target.exists():
+                found.append(url)
+        return segment
+
+    _outside_code(text, scan)
+    return found
+
+
+@dataclass
+class PluginReport:
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    pages: int = 0
+
+
+def check_plugin(root: Path, strict: bool = False) -> PluginReport:
+    """What CI asks of a plugin's manuals and their translations."""
+    from .plugin import Plugin
+    from .status import page_status
+    plugin = Plugin.open(root)
+    report = PluginReport()
+    tree = check_tree(plugin.root / "Docs")
+    for name, found in tree.failures.items():
+        report.errors.append(f"Docs/{name}: {found[0]}")
+    pages = plugin.pages()
+    report.pages = len(pages)
+    for page in pages:
+        status = page_status(plugin, page)
+        if status.state == "untracked":
+            report.errors.append(f"Docs/{plugin.target}/{page}: a translation without an alignment table (dreamdocs migrate --write)")
+        elif status.state == "mismatch":
+            report.errors.append(f"Docs/{plugin.target}/{page}: no longer matches its alignment table ({status.detail})")
+        elif status.state in ("outdated", "missing"):
+            stale = status.comparison.count("stale") + status.comparison.count("missing") if status.comparison else 0
+            note = f"Docs/{plugin.target}/{page}: {status.state}" + (f", {stale} paragraphs to translate" if stale else "") + \
+                (f" ({status.detail})" if status.detail else "")
+            (report.errors if strict and status.state == "outdated" else report.warnings).append(note)
+    english = set(pages)
+    for path in sorted(plugin.mirror.rglob("*.md")):
+        relative = path.relative_to(plugin.mirror).as_posix()
+        if relative.startswith("."):
+            continue
+        if not (plugin.root / "Docs" / relative).exists():
+            report.errors.append(f"Docs/{plugin.target}/{relative}: a translation of no English page")
+        for url in _broken_links(path, path.read_text(encoding="utf-8")):
+            (report.errors if strict else report.warnings).append(f"Docs/{plugin.target}/{relative}: broken link {url}")
+    tables = plugin.mirror / ".align"
+    if tables.exists():
+        for path in sorted(tables.rglob("*.tsv")):
+            page = path.relative_to(tables).as_posix()[:-4]
+            if page not in english:
+                report.errors.append(f"Docs/{plugin.target}/.align/{page}.tsv: a table for no English page")
+    return report
 
 
 def check_tree(root: Path) -> Report:
