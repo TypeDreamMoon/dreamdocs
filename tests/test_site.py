@@ -317,6 +317,19 @@ class SiteSyncTests(unittest.TestCase):
         site.localize_translation_links(self.root, planned, [])
         self.assertEqual(planned[guide], "[A](/docs/existing#stable) [B](/en/docs/existing#absent) [C](/en/docs/missing)\n")
 
+    def test_site_options_strip_the_leading_title_and_prefer_plugin_titles(self):
+        site.write(self.plugin / "Docs/guide.md", "---\ntitle: Plugin title\n---\n\n# Guide\n\nEnglish paragraph.\n")
+        self.sync()
+        english = site.read(self.root / "content/docs/guide.en.md")
+        self.assertIn('title: "Website title"', english)
+        self.assertIn("# Guide", english)
+        self.cfg.update(stripLeadingTitle=True, titleSource="plugin")
+        self.save()
+        self.sync()
+        english = site.read(self.root / "content/docs/guide.en.md")
+        self.assertIn('title: "Plugin title"', english)
+        self.assertNotIn("# Guide", english)
+
     def test_validate_catches_edited_output(self):
         self.first_import()
         self.assertEqual(site.validate(self.root), 1)

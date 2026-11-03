@@ -199,6 +199,16 @@ def split_notes(text):
     return text, '', ''
 
 
+def strip_leading_title(body):
+    """Drop a leading level-1 heading: the page template already renders the title.
+
+    A plugin keeps `# Title` at the top of a topic so the file reads well on GitHub;
+    a site whose template renders DocsTitle from the same title would show two <h1>.
+    Sites opt in with "stripLeadingTitle": true in docs-sync/config.json.
+    """
+    return re.sub(r"\A# [^\n]*\n+(?=\S)", "", body, count=1)
+
+
 def route(page_id, locale="en"):
     slug = page_id[:-6] if page_id.endswith("/index") else "" if page_id == "index" else page_id
     return ("/en/docs/" if locale == "en" else "/docs/") + slug
@@ -304,6 +314,12 @@ def plugin_statuses(plugin):
         states = result.comparison.states if result.comparison else []
         pending = sum(1 for s in states if s.state in ('stale', 'missing'))
         status = {'current': 'current', 'missing': 'missing'}.get(result.state)
+        legacy = legacy_record(plugin, name)
+        if result.state == 'untracked' and legacy is not None:
+            # A plugin not moved to dreamdocs yet: its per-page record decides, as it always did.
+            fingerprint = digest(read(source_file(plugin, name)))
+            status = ('unreviewed' if not legacy.get('sourceHash') else
+                      'current' if legacy['sourceHash'] == fingerprint else 'outdated')
         if status is None:
             status = 'unreviewed' if result.state in ('untracked', 'mismatch') else 'outdated'
             table_path = owner.alignment(page)
@@ -315,8 +331,18 @@ def plugin_statuses(plugin):
     return rows
 
 
+def legacy_record(plugin, source):
+    """The per-page record of a plugin translated before dreamdocs (Docs/zh-CN/.translations), if any."""
+    relative = Path(source).relative_to('Docs').as_posix()
+    return load(Path(plugin) / 'Docs/zh-CN/.translations' / (relative + '.json'))
+
+
 def aligned_english(plugin, source, table):
     """The English a Chinese page was laid out from, else today's English."""
+    if table is None:
+        legacy = legacy_record(plugin, source)
+        if legacy and legacy.get('source'):
+            return legacy['source']
     if table is not None and table.rev:
         result = subprocess.run(['git', '-C', str(plugin), 'show', f'{table.rev}:{source}'],
                                 capture_output=True, check=False)
@@ -448,8 +474,15 @@ def sync(root, plugin, revision=None, check=False, adopt_existing=False):
             chunks.append(rewrite_links(html_to_explicit(selected), entry["path"], cfg["repository"], revision,
                                         source_routes, bool(entry.get("heading")), anchors))
         body = "\n\n".join(chunks)
-        title = page.get("title") or field(source_front, "title") or next((h[1] for h in headings(body)), page_id)
-        description = page.get("description", field(source_front, "description", title))
+        if cfg.get("stripLeadingTitle"):
+            body = strip_leading_title(body)
+        if cfg.get("titleSource") == "plugin":
+            # The plugin's frontmatter wins over the site's mapping (the narrative site's choice).
+            title = field(source_front, "title") or page.get("title") or next((h[1] for h in headings(body)), page_id)
+            description = field(source_front, "description") or page.get("description") or title
+        else:
+            title = page.get("title") or field(source_front, "title") or next((h[1] for h in headings(body)), page_id)
+            description = page.get("description", field(source_front, "description", title))
         semantic_body = body.replace(f"/blob/{revision}/", "/blob/SOURCE/").replace(
             f"raw.githubusercontent.com/{cfg['repository']}/{revision}/", f"raw.githubusercontent.com/{cfg['repository']}/SOURCE/")
         source_hash = digest(json_text({"sources": fingerprints, "title": title, "description": description,
@@ -537,9 +570,15 @@ def plan_chinese(root, plugin, cfg, definitions, pages, old, planned, removals, 
             selected = select_translation(body, entry, aligned_english(plugin, entry['path'], table))
             bodies.append(rewrite_links(selected, translated.relative_to(plugin).as_posix(), cfg['repository'],
                                         revision, source_routes, bool(entry.get('heading'))))
-            source_records.append({'path': entry['path'], 'alignedRevision': table.rev if table else None,
-                                   'alignedPage': table.extra.get('page') if table else None,
-                                   'translationHash': digest(read(translated))})
+            if table is None and legacy_record(plugin, entry['path']) is not None:
+                legacy = legacy_record(plugin, entry['path'])
+                source_records.append({'path': entry['path'], 'sourceHash': legacy.get('sourceHash'),
+                                       'sourceRevision': legacy.get('sourceRevision'),
+                                       'translationHash': digest(read(translated))})
+            else:
+                source_records.append({'path': entry['path'], 'alignedRevision': table.rev if table else None,
+                                       'alignedPage': table.extra.get('page') if table else None,
+                                       'translationHash': digest(read(translated))})
         old_path = translation_path(root, page_id)
         old_text = read(old_path) if old_path.exists() else ''
         old_prose, marker, notes = split_notes(old_text)
@@ -580,7 +619,9 @@ def plan_chinese(root, plugin, cfg, definitions, pages, old, planned, removals, 
         page['translation'].update(outputHash=digest(text), bodyHash=digest(split_notes(text)[0].rstrip()))
         planned[record_path] = json_text({'version': 2, 'status': page['translation']['status'],
             'sourceHash': page['hash'] if page['translation']['status'] == 'current' else None,
-            'sourceRevision': revision, 'sources': source_records,
+            # The revision this page's source is pinned to, not the sync's: an unrelated
+            # English edit elsewhere must not rewrite every record.
+            'sourceRevision': page['revision'], 'sources': source_records,
             'translationFile': page['translation']['output'], 'translationHash': digest(text)})
 
 
