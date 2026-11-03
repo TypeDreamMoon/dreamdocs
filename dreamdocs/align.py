@@ -56,7 +56,8 @@ class Alignment:
 
     @classmethod
     def loads(cls, text: str, where: str = "alignment") -> "Alignment":
-        lines = text.rstrip("\n").split("\n")
+        # A Windows checkout with core.autocrlf turns the table's line ends into CRLF.
+        lines = text.replace("\r\n", "\n").lstrip("﻿").rstrip("\n").split("\n")
         head = lines[0].split("\t")
         if head[0] != HEADER:
             raise ValueError(f"{where}: not a dreamdocs alignment table")

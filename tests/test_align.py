@@ -27,6 +27,7 @@ class AlignTests(unittest.TestCase):
     def test_round_trip_of_the_table_format(self):
         table = table_for(EN_OLD, ZH_OLD)
         self.assertEqual(Alignment.loads(table.dumps()).dumps(), table.dumps())
+        self.assertEqual(Alignment.loads(table.dumps().replace("\n", "\r\n")).dumps(), table.dumps())
 
     def test_unchanged_english_is_current(self):
         result = compare(table_for(EN_OLD, ZH_OLD), parse(EN_OLD), parse(ZH_OLD))
