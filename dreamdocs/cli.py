@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -152,6 +153,31 @@ def _translate(args) -> int:
     return 1 if summary.unfinished or summary.stopped else 0
 
 
+def _site(args) -> int:
+    from . import site
+    root = Path(args.site).resolve()
+    if args.action == "ci":
+        from . import site_ci
+        return site_ci.main(args.ci_command, root)
+    if args.action == "sync":
+        plugin = args.plugin or os.environ.get("DOCS_PLUGIN_PATH")
+        if not plugin:
+            raise ValueError("pass --plugin (CI checks the plugin out explicitly)")
+        changes = site.sync(root, plugin, args.revision, args.check, args.adopt_existing)
+        print(f"{len(changes)} source file changes" + (" (check only)" if args.check else ""))
+        if args.check and changes:
+            return 1
+    elif args.action == "validate":
+        print(f"{site.validate(root)} generated pages verified")
+    if args.action == "status" or args.report:
+        summary = site.report(root)
+        if args.report:
+            site.write(args.report, summary)
+        else:
+            print(summary)
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="dreamdocs", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -197,6 +223,17 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("profiles", help="list the translator profiles dreamdocs can use")
     p.set_defaults(run=_profiles)
+
+    p = sub.add_parser("site", help="documentation-site commands: generate pages from a plugin checkout")
+    p.add_argument("action", choices=["sync", "status", "validate", "ci"])
+    p.add_argument("ci_command", nargs="?", choices=["event", "commit-source"], help="for ci: what to do")
+    p.add_argument("--site", default=".", help="the documentation site checkout")
+    p.add_argument("--plugin", help="the plugin checkout (sync)")
+    p.add_argument("--revision", help="the exact plugin commit (default: its HEAD)")
+    p.add_argument("--check", action="store_true", help="sync: report changes, write nothing")
+    p.add_argument("--adopt-existing", action="store_true", help="sync: first migration of a site's own Chinese pages")
+    p.add_argument("--report", help="also write the translation status here")
+    p.set_defaults(run=_site)
 
     args = parser.parse_args(argv)
     try:
