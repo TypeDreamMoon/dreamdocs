@@ -18,7 +18,26 @@ dreamdocs status --plugin .                  # which slots of each translated pa
 dreamdocs profiles                           # the translator profiles found
 dreamdocs translate --plugin . --dry-run     # what would be sent, and roughly what it costs
 dreamdocs translate --plugin . --profile ocgo
+dreamdocs check --plugin .                   # what CI checks; --strict also fails outdated translations
 ```
+
+Without a translator: `dreamdocs translate --plugin . --export pending.json` writes the paragraphs still to
+translate; fill in each `answer` (keeping every `⟦n⟧` placeholder) and run `--answers pending.json`. The answers pass
+the same checks a model's do. `--offline` only rebuilds the pages whose every paragraph is known.
+
+## Plugins
+
+A plugin keeps its English manuals in `Docs/`, their Chinese copies in `Docs/zh-CN/` and, next to them,
+`Docs/zh-CN/.align/<page>.tsv`: which English each Chinese paragraph was made from. `Docs/dreamdocs.json` names the
+tool version, excluded pages, identifiers never to translate (`keep`), diagnostic-code patterns (`codes`) and the
+pages translated by hand (`manual`). `Docs/zh-CN/.dreamdocs/glossary.json` and `prompt.md` add to the built-in
+glossary and instructions. Edit a Chinese page directly to correct it; the next run notices and keeps the edit.
+
+## Documentation sites
+
+A site keeps its page mapping in `docs-sync/config.json`, its own pages and the notes after
+`<!-- docs-sync:notes -->`. `dreamdocs site sync --site . --plugin <plugin checkout>` generates both locales from the
+plugin; `site validate` checks the result; `site ci event|commit-source` are its GitHub Actions steps.
 
 ## Translators
 
