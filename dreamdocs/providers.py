@@ -7,6 +7,7 @@ x-opencode-session headers its terms ask clients for.
 from __future__ import annotations
 
 import email.utils
+import http.client
 import json
 import re
 import time
@@ -174,6 +175,9 @@ class Client:
             body["temperature"] = temperature
         if p.type == "OpenCodeGo" and session:
             headers["x-opencode-session"] = session
+        clash = sorted(set(p.extra_body) & {"model", "messages", "system", "instructions", "input"})
+        if clash:
+            raise Stop(f"profile {p.name!r}: ExtraBody may add switches but not replace {', '.join(clash)}")
         body.update(p.extra_body)
         headers.update(p.headers)
         request = urllib.request.Request(end.base + path, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -192,8 +196,9 @@ class Client:
             if error.code in (400, 401, 402, 403, 404, 422):
                 raise Stop(message) from None
             raise ProviderError(message) from None
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise Busy(f"{p.name}: connection failed ({_redact(str(error), p.secrets())})") from None
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
+            # Includes a reply cut off mid-body (IncompleteRead): worth sending again.
+            raise Busy(f"{p.name}: connection failed ({_redact(str(error) or type(error).__name__, p.secrets())})") from None
         except ValueError:
             raise ProviderError(f"{p.name}: the reply is not JSON") from None
         return self._read(end.api, data)
