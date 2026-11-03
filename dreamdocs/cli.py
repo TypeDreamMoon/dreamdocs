@@ -23,6 +23,16 @@ def _segments(args) -> int:
 
 
 def _check(args) -> int:
+    if args.plugin:
+        report = check.check_plugin(Path(args.plugin), strict=args.strict)
+        for line in report.warnings:
+            print(f"warning: {line}")
+        for line in report.errors:
+            print(f"error: {line}")
+        print(f"{report.pages} pages; {len(report.errors)} errors, {len(report.warnings)} warnings")
+        return 1 if report.errors else 0
+    if not args.paths:
+        raise ValueError("pass --plugin, or folders to self-check")
     failed = 0
     for target in args.paths:
         report = check.check_tree(Path(target))
@@ -106,46 +116,66 @@ def _translate(args) -> int:
     from .profiles import choose
     from .providers import Client
     plugin = Plugin.open(args.plugin)
-    profile = choose(args.profile, plugin.config.get("profile"))
-    if args.model:
+    offline = args.offline or bool(args.export) or bool(args.answers)
+    profile = None if offline else choose(args.profile, plugin.config.get("profile"))
+    if profile is not None and args.model:
         profile.model = args.model
-    if args.concurrency:
+    if profile is not None and args.concurrency:
         profile.concurrency = args.concurrency
-    cache = Cache(enabled=not args.no_cache)
+    model = profile.model if profile else (args.model or "")
+    cache = Cache(enabled=not args.no_cache and bool(model))
     pages = plugin.pages()
     if args.page:
         unknown = sorted(set(args.page) - set(pages))
         if unknown:
             raise ValueError(f"not an English manual of this plugin: {', '.join(unknown)} (paths are relative to Docs/)")
         pages = [p for p in pages if p in args.page]
-    plans, jobs = translate.plan(plugin, pages, cache, profile.model, reuse=not args.no_reuse, rebuild=args.rebuild)
-    client = Client(profile, cache)
-    est = translate.estimate(plans, jobs, profile, client if profile.type == "OpenCodeGo" else None,
-                             translate.system_prompt(plugin))
-    todo = est.jobs - est.cached
-    if args.limit is not None:
-        todo = min(todo, args.limit)
-    print(f"{profile.describe()}")
-    print(f"{est.pages} pages to write; {est.jobs} slots to translate ({est.cached} already cached), "
-          f"{est.reused} copied from identical English elsewhere")
-    if todo:
-        cost = f", about ${est.cost:.2f}" if est.cost is not None else ""
-        print(f"to send: {todo} slots, {est.chars:,} characters in about {est.requests} requests "
-              f"(~{est.input_tokens:,} input / ~{est.output_tokens:,} output tokens{cost})")
+    plans, jobs = translate.plan(plugin, pages, cache, model, reuse=not args.no_reuse, rebuild=args.rebuild)
     for p in plans:
         if p.note:
             print(f"  skipped {p.page}: {p.note}")
-    if args.dry_run:
+    if args.export:
+        count = translate.export_jobs(jobs, Path(args.export))
+        print(f"{count} slots written to {args.export}; fill in the answers, then run with --answers {args.export}")
         return 0
-    if todo and not args.yes and not translate.confirm(f"send {todo} slots to {profile.name}?"):
-        return 1
+    if args.answers:
+        accepted, problems = translate.apply_answers(jobs, Path(args.answers))
+        print(f"{accepted} answers accepted")
+        for line in problems:
+            print(f"  refused {line}")
+        if problems:
+            return 1
+    client = Client(profile, cache) if profile else None
+    if profile is not None:
+        est = translate.estimate(plans, jobs, profile, client if profile.type == "OpenCodeGo" else None,
+                                 translate.system_prompt(plugin))
+        todo = est.jobs - est.cached
+        if args.limit is not None:
+            todo = min(todo, args.limit)
+        print(f"{profile.describe()}")
+        print(f"{est.pages} pages to write; {est.jobs} slots to translate ({est.cached} already cached), "
+              f"{est.reused} copied from identical English elsewhere")
+        if todo:
+            cost = f", about ${est.cost:.2f}" if est.cost is not None else ""
+            print(f"to send: {todo} slots, {est.chars:,} characters in about {est.requests} requests "
+                  f"(~{est.input_tokens:,} input / ~{est.output_tokens:,} output tokens{cost})")
+        if args.dry_run:
+            return 0
+        if todo and not args.yes and not translate.confirm(f"send {todo} slots to {profile.name}?"):
+            return 1
+    elif args.dry_run:
+        print(f"{sum(1 for j in jobs.values() if j.result is None)} slots to translate; offline: nothing is sent")
+        return 0
     summary = translate.run(plugin, profile, plans, jobs, client, cache, args.limit,
                             log=lambda line: print(line, file=sys.stderr))
+    sent = f"; {client.requests} requests, {client.input_tokens:,} input / {client.output_tokens:,} output tokens" \
+        if client else " (offline)"
     print(f"wrote {len(summary.written)} pages; {summary.sent} slots translated, {summary.cached} from the cache, "
-          f"{summary.reused} copied; {client.requests} requests, {client.input_tokens:,} input / "
-          f"{client.output_tokens:,} output tokens")
+          f"{summary.reused} copied{sent}")
     for page, left in summary.unfinished:
         print(f"  not written {page}: {left} slots still untranslated")
+    if offline:
+        return 0  # Pages still waiting for a translation are expected without a translator.
     for line in summary.failures[:20]:
         print(f"  failed {line}")
     if summary.stopped:
@@ -188,8 +218,10 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true")
     p.set_defaults(run=_segments)
 
-    p = sub.add_parser("check", help="self-check the splitter on every Markdown file under the given folders")
-    p.add_argument("paths", nargs="+")
+    p = sub.add_parser("check", help="check a plugin's manuals and translations (--plugin), or self-check folders")
+    p.add_argument("paths", nargs="*", help="folders whose Markdown the splitter self-checks")
+    p.add_argument("--plugin", help="check this plugin: tables, structure, links, and (with --strict) staleness")
+    p.add_argument("--strict", action="store_true", help="outdated translations and broken links fail too")
     p.add_argument("--limit", type=int, default=3, help="problems shown per file")
     p.set_defaults(run=_check)
 
@@ -219,6 +251,10 @@ def main(argv=None) -> int:
     p.add_argument("--no-reuse", action="store_true", help="translate identical English again instead of copying")
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--rebuild", action="store_true", help="rewrite every translated page from today's English layout")
+    p.add_argument("--offline", action="store_true",
+                   help="send nothing: only write pages whose every slot is known (needs no profile)")
+    p.add_argument("--export", metavar="FILE", help="write the slots still to translate to a JSON file and stop")
+    p.add_argument("--answers", metavar="FILE", help="take translations filled into an exported file (implies --offline)")
     p.set_defaults(run=_translate)
 
     p = sub.add_parser("profiles", help="list the translator profiles dreamdocs can use")

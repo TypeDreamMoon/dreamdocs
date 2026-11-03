@@ -47,6 +47,7 @@ class Job:
     problem: str = ""
     result: list[str] | None = None
     cached: bool = False
+    origin: str = "m"          # h when the answer came from a person through --answers
 
 
 @dataclass
@@ -429,7 +430,7 @@ def assemble(p: PagePlan, plugin: Plugin, translated_pages: set[str]) -> tuple[s
     for index, slot in enumerate(p.english.slots):
         if index in p.waiting:
             texts.append(p.waiting[index].result)
-            origins.append("m")
+            origins.append(p.waiting[index].origin)
         else:
             value, origin = p.fill[index]
             texts.append(value)
@@ -440,7 +441,7 @@ def assemble(p: PagePlan, plugin: Plugin, translated_pages: set[str]) -> tuple[s
     return out, origins
 
 
-def write_page(p: PagePlan, plugin: Plugin, translated_pages: set[str], model: str) -> None:
+def write_page(p: PagePlan, plugin: Plugin, translated_pages: set[str], model: str | None) -> None:
     out, origins = assemble(p, plugin, translated_pages)
     zh = parse(out)
     if [s.signature for s in zh.slots] != [s.signature for s in p.english.slots]:
@@ -451,7 +452,7 @@ def write_page(p: PagePlan, plugin: Plugin, translated_pages: set[str], model: s
     table = Alignment(f"Docs/{p.page}", plugin.revision()[:12])
     table.extra["page"] = page_hash(p.english)
     old_model = p.table.extra.get("model", "") if p.table else ""
-    if p.waiting:
+    if p.waiting and model:
         table.extra["model"] = model
     elif old_model:
         table.extra["model"] = old_model
@@ -498,20 +499,66 @@ def estimate(plans: list[PagePlan], jobs: dict[str, Job], profile: Profile, clie
                     len(groups), chars, input_tokens, output_tokens, cost)
 
 
-def run(plugin: Plugin, profile: Profile, plans: list[PagePlan], jobs: dict[str, Job], client: Client,
+def export_jobs(jobs: dict[str, Job], path: Path) -> int:
+    """Write the slots still to translate, for a person or any other tool to fill in (see apply_answers)."""
+    slots = []
+    for job in jobs.values():
+        if job.result is not None:
+            continue
+        entry = {"key": job.key, "page": job.page, "kind": KIND_NAMES[job.slot.kind]}
+        if job.section:
+            entry["section"] = job.section
+        if job.slot.kind == "row":
+            entry["cells"] = job.masked
+        else:
+            entry["text"] = job.masked[0]
+        if job.previous_translation:
+            entry["previous_translation"] = job.previous_translation
+        entry["answer"] = [None if m is None else "" for m in job.masked] if job.slot.kind == "row" else ""
+        slots.append(entry)
+    note = ("Fill in each answer: the Chinese for text (or for each non-null cell), keeping every ⟦n⟧ "
+            "placeholder exactly as often as in the English. Then run dreamdocs translate --answers <this file>.")
+    path.write_text(json.dumps({"version": 1, "instructions": note, "slots": slots}, ensure_ascii=False, indent=1) + "\n",
+                    encoding="utf-8")
+    return len(slots)
+
+
+def apply_answers(jobs: dict[str, Job], path: Path) -> tuple[int, list[str]]:
+    """Take filled-in answers from an exported file; every answer passes the same checks as a model's."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    accepted, problems = 0, []
+    for entry in data.get("slots", []):
+        answer = entry.get("answer")
+        if answer in ("", None) or (isinstance(answer, list) and all(a in ("", None) for a in answer)):
+            continue
+        job = jobs.get(entry.get("key", ""))
+        if job is None:
+            problems.append(f"{entry.get('page')}: {entry.get('key')} is no longer to translate (the English changed?)")
+            continue
+        texts, problem = accept(job, answer)
+        if texts is None:
+            problems.append(f"{job.page}: {(entry.get('text') or '')[:60]!r}: {problem}")
+            continue
+        job.result, job.origin = texts, "h"
+        accepted += 1
+    return accepted, problems
+
+
+def run(plugin: Plugin, profile: Profile | None, plans: list[PagePlan], jobs: dict[str, Job], client: Client | None,
         cache: Cache, limit: int | None = None, log=print) -> Summary:
+    """Translate what is missing (nothing is sent without a profile), then write every finished page."""
     summary = Summary(jobs=len(jobs), cached=sum(j.cached for j in jobs.values()))
     summary.reused = sum(1 for p in plans for _, origin in p.fill.values() if origin == "c")
     for p in plans:
         if p.note:
             summary.skipped.append((p.page, p.note))
-    todo = [j for j in jobs.values() if j.result is None]
+    todo = [j for j in jobs.values() if j.result is None] if profile is not None else []
     if limit is not None:
         todo = todo[:limit]
     titles = {p.page: next((squash(s.texts[0]) for s in p.english.slots if s.kind in ("h", "meta")), p.page) for p in plans}
-    runner = Run(plugin, profile, client, cache, log)
-    rounds = [batches(todo, profile.chunk_chars)]
-    for attempt in range(profile.retry + 1):
+    runner = Run(plugin, profile, client, cache, log) if profile is not None else None
+    rounds = [batches(todo, profile.chunk_chars)] if profile is not None else [[]]
+    for attempt in range((profile.retry + 1) if profile is not None else 0):
         groups = rounds[-1]
         if not groups or runner.stop.is_set():
             break
@@ -529,8 +576,8 @@ def run(plugin: Plugin, profile: Profile, plans: list[PagePlan], jobs: dict[str,
             left = [job for part in pool.map(one, groups) for job in part]
         # A slot that failed is asked again on its own, with what was wrong.
         rounds.append([[job] for job in left])
-    summary.sent = runner.sent
-    summary.stopped = runner.stop_reason
+    summary.sent = runner.sent if runner else 0
+    summary.stopped = runner.stop_reason if runner else ""
     summary.failures = [f"{j.page} {j.id}: {j.problem}" for g in rounds[-1] for j in g if j.problem]
 
     finished = [p for p in plans if p.needs_write and all(j.result is not None for j in p.waiting.values())]
@@ -539,7 +586,7 @@ def run(plugin: Plugin, profile: Profile, plans: list[PagePlan], jobs: dict[str,
         if not p.needs_write:
             continue
         if p in finished:
-            write_page(p, plugin, translated_pages, profile.model)
+            write_page(p, plugin, translated_pages, profile.model if profile else None)
             summary.written.append(p.page)
         else:
             summary.unfinished.append((p.page, sum(1 for j in p.waiting.values() if j.result is None)))

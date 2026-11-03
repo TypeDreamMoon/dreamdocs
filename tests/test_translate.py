@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -201,6 +202,66 @@ class TranslateTests(unittest.TestCase):
         client = Client(Profile("ocgo", "OpenCodeGo", model="chatty", api_key="k"), Cache(Path(self.tmp.name) / "c2"),
                         models_url=self.server.url + "/models")
         self.assertEqual((client.endpoint().api, client.endpoint().price), ("chat", (0.15, 0.6)))
+
+    def test_export_and_answers_translate_without_a_model(self):
+        plugin = Plugin.open(self.root)
+        plans, jobs = translate.plan(plugin, ["guide/b.md"], self.cache, "")
+        path = Path(self.tmp.name) / "pending.json"
+        count = translate.export_jobs(jobs, path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(count, len(data["slots"]))
+        for entry in data["slots"]:
+            entry["answer"] = "答" + entry["text"]
+        broken = next(e for e in data["slots"] if "⟦1⟧" in e["text"])   # One answer loses its placeholders.
+        broken["answer"] = "没有占位符"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        accepted, problems = translate.apply_answers(jobs, path)
+        self.assertEqual((accepted, len(problems)), (count - 1, 1))
+        self.assertIn("placeholders wrong", problems[0])
+        broken["answer"] = "答" + broken["text"]
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        plans, jobs = translate.plan(plugin, ["guide/b.md"], self.cache, "")
+        translate.apply_answers(jobs, path)
+        summary = translate.run(plugin, None, plans, jobs, None, self.cache, log=quiet)
+        self.assertEqual(summary.written, ["guide/b.md"])
+        self.assertEqual(self.server.requests, [])
+        self.assertEqual({r.origin for r in Alignment.read(plugin.alignment("guide/b.md")).rows} - {"s"}, {"h"})
+
+    def test_offline_run_writes_only_complete_pages(self):
+        plugin = Plugin.open(self.root)
+        plans, jobs = translate.plan(plugin, ["types.md"], self.cache, "")
+        summary = translate.run(plugin, None, plans, jobs, None, self.cache, log=quiet)
+        self.assertEqual((summary.written, summary.unfinished[0][0]), ([], "types.md"))
+        self.assertEqual(self.server.requests, [])
+
+    def test_plugin_check(self):
+        from dreamdocs import check
+        self.go()
+        report = check.check_plugin(self.root)
+        self.assertEqual(report.errors, [])
+        self.assertTrue(any("other.md: missing" in w for w in report.warnings))
+        (self.root / "Docs/zh-CN/orphan.md").write_text("# 孤儿\n", encoding="utf-8")
+        (self.root / "Docs/zh-CN/guide/b.md").write_text(self.zh("guide/b.md") + "\n多的一段。\n", encoding="utf-8")
+        (self.root / "Docs/types.md").write_text(PAGE_A.replace("for colour", "for colours"), encoding="utf-8")
+        report = check.check_plugin(self.root, strict=True)
+        joined = "\n".join(report.errors)
+        self.assertIn("orphan.md: a translation of no English page", joined)
+        self.assertIn("guide/b.md: no longer matches its alignment table", joined)
+        self.assertIn("types.md: outdated, 1 paragraphs to translate", joined)
+
+    def test_cut_off_replies_are_retried_and_extra_body_cannot_replace_the_model(self):
+        import http.client
+        from dreamdocs.providers import Busy, Stop
+
+        class Cut:
+            def open(self, request, timeout):
+                raise http.client.IncompleteRead(b"")
+        client = Client(self.profile, self.cache, opener=Cut())
+        with self.assertRaises(Busy):
+            client.complete("s", "u")
+        self.profile.extra_body = {"model": "other"}
+        with self.assertRaisesRegex(Stop, "not replace model"):
+            Client(self.profile, self.cache).complete("s", "u")
 
     def test_estimate_sends_nothing(self):
         plugin = Plugin.open(self.root)
