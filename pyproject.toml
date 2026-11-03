@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dreamdocs"
+dynamic = ["version"]
+description = "Translate plugin manuals paragraph by paragraph and keep the translations aligned"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+dreamdocs = "dreamdocs.cli:main"
+
+[tool.setuptools]
+packages = ["dreamdocs"]
+
+[tool.setuptools.dynamic]
+version = { attr = "dreamdocs.__version__" }
