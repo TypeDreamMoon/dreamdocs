@@ -66,6 +66,8 @@ def anchor_tokens(text: str) -> str:
     """Fingerprint of the code spans a faithful translation must keep verbatim.
 
     Link destinations are left out: translated pages may point at the Chinese copy.
+    Only the code is compared, not its backticks: a model that wrapped a protected
+    `x` in backticks again produced ``x``, which renders the same.
     """
-    tokens = sorted(m.group(0) for m in CODE.finditer(text))
+    tokens = sorted(m.group(2).strip() for m in CODE.finditer(text))
     return hashlib.sha256("\x1f".join(tokens).encode("utf-8")).hexdigest()[:6] if tokens else ""
