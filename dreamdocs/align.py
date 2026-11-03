@@ -111,7 +111,7 @@ def compare(table: Alignment, english: Doc, translated: Doc) -> Comparison:
         return Comparison([], f"slot {first + 1}: page has {signatures[first] if first < len(signatures) else 'nothing'},"
                               f" table has {recorded[first] if first < len(recorded) else 'nothing'}")
     edited = [i for i, (slot, row) in enumerate(zip(translated.slots, table.rows))
-              if slot.key[:8] != row.zh and row.origin != "s"]
+              if slot.text_key != row.zh and row.origin != "s"]
     old = [row.known or f"-{i}" for i, row in enumerate(table.rows)]
     new = [slot.key for slot in english.slots]
     states: list[SlotState] = [SlotState(j, "missing") for j in range(len(new))]

@@ -456,7 +456,7 @@ def write_page(p: PagePlan, plugin: Plugin, translated_pages: set[str], model: s
         table.extra["model"] = model
     elif old_model:
         table.extra["model"] = old_model
-    table.rows = [Row(e.signature, e.key, z.key[:8], o) for e, z, o in zip(p.english.slots, zh.slots, origins)]
+    table.rows = [Row(e.signature, e.key, z.text_key, o) for e, z, o in zip(p.english.slots, zh.slots, origins)]
     path = plugin.translation(p.page)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(out, encoding="utf-8", newline="\n")

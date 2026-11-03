@@ -25,6 +25,11 @@ class SplitTests(unittest.TestCase):
     def test_wrapped_chinese_joins_without_a_space(self):
         self.assertEqual(kinds("由绑定器检查，\n并由 `Graph`\n的声明\ncheck it.\n"),
                          [("p", ["由绑定器检查，并由 `Graph` 的声明 check it."])])
+        self.assertEqual(kinds("以及\n[模块](a.md)和**粗体**\n接着\n"), [("p", ["以及[模块](a.md)和**粗体**接着"])])
+
+    def test_text_key_ignores_how_lines_were_joined(self):
+        self.assertEqual(parse("甲乙\n丙\n").slots[0].text_key, parse("甲乙 丙\n").slots[0].text_key)
+        self.assertNotEqual(parse("甲乙丙\n").slots[0].text_key, parse("甲乙丁\n").slots[0].text_key)
 
     def test_headings_keep_ids_and_closing_hashes_in_the_skeleton(self):
         self.assertEqual(kinds("## Types [#types]\n\n### Notes ##\n\nUnderlined\nheading\n==\n"),

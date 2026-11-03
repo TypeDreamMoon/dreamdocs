@@ -19,7 +19,7 @@ def table_for(en, zh, origin="m"):
     table = Alignment("Docs/types.md", "abc")
     for j, slot in enumerate(translated.slots):
         i = pairs.get(j)
-        table.rows.append(Row(slot.signature, source.slots[i].key if i is not None else "-", slot.key[:8], origin))
+        table.rows.append(Row(slot.signature, source.slots[i].key if i is not None else "-", slot.text_key, origin))
     return table
 
 

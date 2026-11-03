@@ -93,10 +93,10 @@ def migrate_page(plugin: Plugin, page: str) -> PageResult:
     for j, slot in enumerate(translated.slots):
         i = pairs.get(j)
         if i is None:
-            table.rows.append(Row(slot.signature, "-", slot.key[:8], origin))
+            table.rows.append(Row(slot.signature, "-", slot.text_key, origin))
             continue
         en = source.slots[i].key if verified else "~" + source.slots[i].key
-        table.rows.append(Row(slot.signature, en, slot.key[:8], "s" if not translatable(source.slots[i]) else origin))
+        table.rows.append(Row(slot.signature, en, slot.text_key, "s" if not translatable(source.slots[i]) else origin))
     # The old pipeline gave every translation a title and description, also when the English had no
     # frontmatter. Those extra slots have no English to line up with and are not lost structure.
     added = 0 if any(s.kind == "meta" for s in source.slots) else \

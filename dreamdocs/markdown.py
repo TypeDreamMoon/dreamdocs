@@ -72,6 +72,15 @@ class Slot:
         """Content fingerprint of the source prose (12 hex digits)."""
         return digest(self.group + "\0" + "\x1f".join(squash(t) for t in self.texts))[:12]
 
+    @property
+    def text_key(self) -> str:
+        """Fingerprint of a translation's text (8 hex digits), blind to all whitespace.
+
+        Telling a hand edit from an untouched translation must not depend on how wrapped
+        lines are joined, which differs between languages.
+        """
+        return digest(self.group + "\0" + "\x1f".join(re.sub(r"\s+", "", t) for t in self.texts))[:8]
+
 
 @dataclass
 class Doc:
@@ -136,11 +145,16 @@ _CJK = re.compile(r"[⺀-鿿가-힯豈-﫿︰-﹏＀-￯　-〿]")
 
 
 def join_lines(lines) -> str:
-    """Join wrapped source lines: a space, except where both sides are CJK (Chinese is not spaced)."""
+    """Join wrapped source lines: a space, except where both sides are CJK (Chinese is not spaced).
+
+    Emphasis and link brackets at the break are looked through: "以及\\n[模块]" joins as "以及[模块]".
+    """
     out = ""
     for line in lines:
-        if out and line and not (_CJK.match(out[-1]) and _CJK.match(line[0])):
-            out += " "
+        if out and line:
+            before, after = out.rstrip("*_])"), line.lstrip("*_[(")
+            if not (before and after and _CJK.match(before[-1]) and _CJK.match(after[0])):
+                out += " "
         out += line
     return out
 
