@@ -414,6 +414,7 @@ def plugin_translation_snapshot(plugin):
 
 
 def sync(root, plugin, revision=None, check=False, adopt_existing=False):
+    root = Path(root).resolve()  # A Windows 8.3 short path would not compare with the resolved ones.
     cfg = config(root)
     plugin = Path(plugin).resolve()
     revision = revision or git(plugin, "rev-parse", "HEAD")
@@ -634,6 +635,7 @@ def translation_path(root, page_id, preferred="mdx"):
 
 
 def statuses(root):
+    root = Path(root).resolve()  # A Windows 8.3 short path would not compare with the resolved ones.
     lock = load(root / "docs-sync/source-lock.json", {"pages": {}})
     rows = []
     for page_id, page in lock["pages"].items():
@@ -799,6 +801,7 @@ def localize_translation_links(root, planned, removals):
 
 
 def validate(root):
+    root = Path(root).resolve()  # A Windows 8.3 short path would not compare with the resolved ones.
     cfg = config(root)
     lock = load(root / "docs-sync/source-lock.json")
     if lock["repository"] != cfg["repository"]:
