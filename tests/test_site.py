@@ -45,8 +45,9 @@ class SiteSyncTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name) / "site"
-        self.plugin = Path(self.temp.name) / "plugin"
+        base = Path(self.temp.name).resolve()   # Windows CI hands out an 8.3 short temp path.
+        self.root = base / "site"
+        self.plugin = base / "plugin"
         self.sha = "a" * 40
         self.dirty = ""
         git = patch.object(site, "git", side_effect=lambda root, *args: self.dirty if args[0] == "status" else self.sha)
