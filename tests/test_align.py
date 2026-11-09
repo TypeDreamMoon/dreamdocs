@@ -73,6 +73,14 @@ class MigrateTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_a_hand_written_translation_is_adopted_as_current(self):
+        (self.plugin.root / "Docs/zh-CN/new.md").write_text("# 新\n\n还没有翻译。\n", encoding="utf-8")
+        self.assertEqual(page_status(self.plugin, "new.md").state, "untracked")
+        result = migrate_page(self.plugin, "new.md", adopt=True)
+        result.table.write(self.plugin.alignment("new.md"))
+        self.assertEqual(page_status(self.plugin, "new.md").state, "current")
+        self.assertEqual({r.origin for r in result.table.rows}, {"h"})
+
     def test_record_becomes_a_table_and_status_reads_it_back(self):
         result = migrate_page(self.plugin, "types.md")
         self.assertEqual((result.lined, result.unaligned, result.added_meta), ("exact", 0, 1))

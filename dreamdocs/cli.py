@@ -70,6 +70,28 @@ def _migrate(args) -> int:
     return 0
 
 
+def _adopt(args) -> int:
+    from .migrate import migrate_page
+    from .plugin import Plugin
+    from .status import page_status
+    plugin = Plugin.open(args.plugin)
+    pages = args.page or [p for p in plugin.pages()
+                          if page_status(plugin, p).state in ("untracked", "mismatch")]
+    for page in pages:
+        if page not in plugin.pages():
+            raise ValueError(f"not an English manual of this plugin: {page}")
+        result = migrate_page(plugin, page, adopt=True)
+        if result.table is None:
+            print(f"  {page}: no translation to adopt")
+            continue
+        result.table.write(plugin.alignment(page))
+        c = result.comparison
+        print(f"  {page}: {c.count('current')} current, {c.count('stale')} stale, {c.count('missing')} missing"
+              + (f"; {result.unaligned} translated slots line up with no English" if result.unaligned else ""))
+    print(f"{len(pages)} pages adopted")
+    return 0
+
+
 def _status(args) -> int:
     from .plugin import Plugin
     from .status import plugin_status
@@ -232,6 +254,12 @@ def main(argv=None) -> int:
     p.add_argument("--report", help="write the Markdown report here instead of printing it")
     p.add_argument("--json", help="write per-page numbers here")
     p.set_defaults(run=_migrate)
+
+    p = sub.add_parser("adopt", help="take a hand-written translation of today's English under alignment")
+    p.add_argument("--plugin", default=".")
+    p.add_argument("--page", action="append",
+                   help="English page relative to Docs/ (repeatable); default: every translation without a usable table")
+    p.set_defaults(run=_adopt)
 
     p = sub.add_parser("status", help="which slots of each translated page are current, stale or missing")
     p.add_argument("--plugin", default=".")

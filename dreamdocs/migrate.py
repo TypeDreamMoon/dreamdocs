@@ -70,7 +70,12 @@ class PluginResult:
     pages: list[PageResult] = field(default_factory=list)
 
 
-def migrate_page(plugin: Plugin, page: str) -> PageResult:
+def migrate_page(plugin: Plugin, page: str, adopt: bool = False) -> PageResult:
+    """Line a translation up with the English it was made from and build its table.
+
+    adopt: the translation was written by hand for today's English (no record says
+    otherwise); its slots that line up count as current, made by a person.
+    """
     english = parse(read(plugin.english(page)))
     zh_path = plugin.translation(page)
     if not zh_path.exists():
@@ -78,7 +83,10 @@ def migrate_page(plugin: Plugin, page: str) -> PageResult:
     translated = parse(read(zh_path))
     record_path = plugin.legacy_record(page)
     record = json.loads(read(record_path)) if record_path.exists() else {}
-    if record.get("source") and record.get("sourceHash"):
+    if adopt:
+        source, verified, rev = english, True, plugin.revision()
+        record = {}
+    elif record.get("source") and record.get("sourceHash"):
         source, verified, rev = parse(record["source"]), True, record.get("sourceRevision", "")
     else:
         # Imported without the English it was made from: assume today's English, never trust it as current.
