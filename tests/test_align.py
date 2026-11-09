@@ -52,6 +52,12 @@ class AlignTests(unittest.TestCase):
         pairs, _ = line_up(parse(en), parse(zh))
         self.assertEqual(pairs, {0: 0, 2: 3})
 
+    def test_adopt_pairs_by_position_where_code_was_translated(self):
+        en = "| Code | Meaning |\n|---|---|\n| DUI2023 | a map (`{ key: value }`) |\n"
+        zh = "| 代码 | 含义 |\n|---|---|\n| DUI2023 | Map（`{ 键: 值 }`） |\n"
+        self.assertEqual(line_up(parse(en), parse(zh))[0], {0: 0})
+        self.assertEqual(line_up(parse(en), parse(zh), by_position=True)[0], {0: 0, 1: 1})
+
     def test_code_only_slots_must_match_verbatim(self):
         pairs, rejected = line_up(parse("| `a` |\n|---|\n| `b` |\n"), parse("| `a` |\n|---|\n| `c` |\n"))
         self.assertEqual((pairs, rejected), ({0: 0}, 0))  # Different code: not even a candidate pair.

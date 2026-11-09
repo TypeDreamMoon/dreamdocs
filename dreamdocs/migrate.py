@@ -29,8 +29,13 @@ def _structure(doc: Doc) -> list[str]:
     return [f"{s.signature}|{inline.anchor_tokens(' '.join(s.texts))}" for s in doc.slots]
 
 
-def line_up(source: Doc, translated: Doc) -> tuple[dict[int, int], int]:
-    """Map translated slot index -> source slot index; also return how many pairs were rejected."""
+def line_up(source: Doc, translated: Doc, by_position: bool = False) -> tuple[dict[int, int], int]:
+    """Map translated slot index -> source slot index; also return how many pairs were rejected.
+
+    by_position: inside a run that differs, pair slots one to one when both sides have
+    as many slots of the same kinds -- for a translation known to follow today's English
+    (adopt), whose code spans were translated along with the prose.
+    """
     a, b = _structure(source), _structure(translated)
     if a == b:
         pairs = {i: i for i in range(len(a))}
@@ -38,6 +43,9 @@ def line_up(source: Doc, translated: Doc) -> tuple[dict[int, int], int]:
         pairs = {}
         for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
             if tag == "equal":
+                pairs.update({j1 + k: i1 + k for k in range(i2 - i1)})
+            elif tag == "replace" and by_position and i2 - i1 == j2 - j1 and all(
+                    source.slots[i1 + k].signature == translated.slots[j1 + k].signature for k in range(i2 - i1)):
                 pairs.update({j1 + k: i1 + k for k in range(i2 - i1)})
     rejected = 0
     for j, i in list(pairs.items()):
@@ -91,7 +99,7 @@ def migrate_page(plugin: Plugin, page: str, adopt: bool = False) -> PageResult:
     else:
         # Imported without the English it was made from: assume today's English, never trust it as current.
         source, verified, rev = english, False, ""
-    pairs, rejected = line_up(source, translated)
+    pairs, rejected = line_up(source, translated, by_position=adopt)
     origin = "m" if record.get("origin") == "ai" else "h"
     table = Alignment(f"Docs/{page}", rev[:12])
     if record.get("model"):
