@@ -17,6 +17,28 @@ from pathlib import Path
 BOT_NAME = "github-actions[bot]"
 BOT_EMAIL = "41898583+github-actions[bot]@users.noreply.github.com"
 DEFAULT_MAX_SLOTS = 3000
+BODY_LIMIT = 60000          # GitHub refuses pull request bodies over 65,536 characters.
+
+
+def _one_line(texts) -> str:
+    return " | ".join(t.strip() for t in texts if t is not None and t.strip())
+
+
+def review(pages) -> list[str]:
+    """For each written page, every paragraph sent: the source, the translation it had, the new one."""
+    out = []
+    for label, plan in pages:
+        jobs = [j for j in plan.waiting.values() if j.result is not None]
+        if not jobs:
+            continue
+        out.append(f"<details><summary><code>{plan.page}</code> ({label}): {len(jobs)} paragraphs</summary>\n")
+        for job in jobs:
+            out.append(f"- **Source:** {_one_line(job.slot.texts)}")
+            if job.previous_translation:
+                out.append(f"  **Before:** {job.previous_translation.strip()}")
+            out.append(f"  **Now:** {_one_line(job.result)}")
+        out.append("\n</details>")
+    return out
 
 
 def _run(args: list[str], cwd: Path, check: bool = True) -> str:
@@ -31,6 +53,7 @@ class Outcome:
     state: str            # skipped / nothing / blocked / failed / pushed
     message: str = ""
     lines: list[str] = field(default_factory=list)
+    review: list[str] = field(default_factory=list)
 
 
 def notice(kind: str, text: str) -> None:
@@ -73,12 +96,14 @@ def translate_pr(root: Path, branch: str = "dreamdocs/translate", base: str = "m
     client = Client(profile, cache)
     outcome = Outcome("nothing")
     stopped = ""
+    written = []
     for w in work:
         todo = sum(1 for j in w.jobs.values() if j.result is None)
         if not todo and not any(p.needs_write for p in w.plans):
             continue
         summary = translate.run(plugin, profile, w.plans, w.jobs, client, cache, limit, log=log)
         limit = max(0, limit - summary.sent)
+        written.extend((w.direction.label, p) for p in w.plans if p.page in summary.written)
         outcome.lines.append(f"- {w.direction.label}: {len(summary.written)} pages written, {summary.sent} paragraphs "
                              f"translated, {summary.cached} from the cache, {summary.reused} copied")
         for page, left in summary.unfinished:
@@ -101,16 +126,24 @@ def translate_pr(root: Path, branch: str = "dreamdocs/translate", base: str = "m
     if report.errors:
         return Outcome("failed", "the translated pages fail dreamdocs check: " + "; ".join(report.errors[:5]),
                        outcome.lines)
+    outcome.review = review(written)
     if not push:
-        return Outcome("pushed", "translated (not pushed)", outcome.lines)
+        return Outcome("pushed", "translated (not pushed)", outcome.lines, outcome.review)
     head = run(["git", "rev-parse", "--short", "HEAD"], root)
     identity = ["-c", f"user.name={BOT_NAME}", "-c", f"user.email={BOT_EMAIL}"]
     run(["git", "checkout", "-B", branch], root)
     run(["git", "add", "--all", "--", "Docs"], root)
     run(["git", *identity, "commit", "--quiet", "-m", f"Update translations for {head}"], root)
     run(["git", "push", "--force", "origin", f"HEAD:refs/heads/{branch}"], root)
+    shown, size = [], 0
+    for line in outcome.review:
+        size += len(line) + 1
+        if size > BODY_LIMIT:
+            shown.append("\n</details>\n\nThe rest is in the run summary and the diff.")
+            break
+        shown.append(line)
     body = "\n".join([f"Translations of the pages that changed up to {head}, made by `dreamdocs ci translate`.", "",
-                      *outcome.lines, "",
+                      *outcome.lines, "", *shown, "",
                       "Review the wording, edit on this branch if needed (the workflow then leaves the branch alone "
                       "until it is merged), and merge with a merge commit, not a squash: the alignment tables record "
                       "the commit they were made from."]
@@ -141,7 +174,8 @@ def main(args) -> int:
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
-            f.write("## Translations\n\n" + (outcome.message or outcome.state) + "\n\n" + "\n".join(outcome.lines) + "\n")
+            f.write("## Translations\n\n" + (outcome.message or outcome.state) + "\n\n" + "\n".join(outcome.lines) + "\n\n"
+                    + "\n".join(outcome.review) + "\n")
     if outcome.state == "skipped":
         notice("warning", outcome.message)
         return 0

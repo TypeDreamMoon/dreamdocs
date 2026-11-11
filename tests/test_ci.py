@@ -52,6 +52,7 @@ class CiTranslateTests(unittest.TestCase):
         self.base = base
         self.gh_calls = []
         self.prs = []
+        self.bodies = []
 
     def clone(self, name):
         path = self.base / name
@@ -62,6 +63,8 @@ class CiTranslateTests(unittest.TestCase):
         def fake(args, cwd, check=True):
             if args[0] == "gh":
                 self.gh_calls.append(args[1:3])
+                if "--body" in args:
+                    self.bodies.append(args[args.index("--body") + 1])
                 if args[1:3] == ["pr", "list"]:
                     return str(self.prs[-1]) if self.prs else ""
                 if args[1:3] == ["pr", "create"]:
@@ -93,6 +96,9 @@ class CiTranslateTests(unittest.TestCase):
         outcome = self.run_ci(self.clone("b"))
         self.assertEqual((outcome.state, outcome.message), ("pushed", "updated pull request #1"))
         self.assertIn("译More.", git(self.remote, "show", "dreamdocs/translate:Docs/zh-CN/guide.md"))
+        self.assertIn("<code>guide.md</code> (en -> zh-CN): 3 paragraphs", self.bodies[-1])
+        self.assertIn("- **Source:** More.\n  **Now:** 译More.", self.bodies[-1])
+        self.assertIn("<code>share.md</code> (zh-CN -> en)", self.bodies[0])
 
     def test_nothing_stale_does_nothing(self):
         a = self.clone("a")
