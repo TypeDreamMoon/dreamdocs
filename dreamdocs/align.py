@@ -79,8 +79,8 @@ class Alignment:
         path.write_text(self.dumps(), encoding="utf-8", newline="\n")
 
 
-def translatable(slot: Slot) -> bool:
-    return any(inline.translatable(t) for t in slot.texts)
+def translatable(slot: Slot, lang: str = "en") -> bool:
+    return any(inline.translatable(t, lang) for t in slot.texts)
 
 
 @dataclass
@@ -101,8 +101,11 @@ class Comparison:
         return sum(1 for s in self.states if s.state == state)
 
 
-def compare(table: Alignment, english: Doc, translated: Doc) -> Comparison:
-    """Line the current English page up with the translation the table describes."""
+def compare(table: Alignment, english: Doc, translated: Doc, lang: str = "en") -> Comparison:
+    """Line the current original page up with the translation the table describes.
+
+    english is the original, whatever its language (lang); the name stays from the common case.
+    """
     signatures = [s.signature for s in translated.slots]
     recorded = [r.signature for r in table.rows]
     if signatures != recorded:
@@ -127,6 +130,6 @@ def compare(table: Alignment, english: Doc, translated: Doc) -> Comparison:
     for s in states:
         if s.old is not None:
             s.edited = s.old in edited
-        if not translatable(english.slots[s.index]):
+        if not translatable(english.slots[s.index], lang):
             s.state = "skip"
     return Comparison(states, edited=edited)

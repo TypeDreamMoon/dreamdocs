@@ -75,16 +75,17 @@ def _adopt(args) -> int:
     from .plugin import Plugin
     from .status import page_status
     plugin = Plugin.open(args.plugin)
-    pages = args.page or [p for p in plugin.pages()
-                          if page_status(plugin, p).state in ("untracked", "mismatch")]
+    directions = {page: d for d in plugin.directions() for page in d.pages()}
+    pages = args.page or [p for p, d in directions.items()
+                          if page_status(plugin, p, direction=d).state in ("untracked", "mismatch")]
     for page in pages:
-        if page not in plugin.pages():
-            raise ValueError(f"not an English manual of this plugin: {page}")
-        result = migrate_page(plugin, page, adopt=True)
+        if page not in directions:
+            raise ValueError(f"not a page of this plugin: {page}")
+        result = migrate_page(plugin, page, adopt=True, direction=directions[page])
         if result.table is None:
             print(f"  {page}: no translation to adopt")
             continue
-        result.table.write(plugin.alignment(page))
+        result.table.write(directions[page].alignment(page))
         c = result.comparison
         print(f"  {page}: {c.count('current')} current, {c.count('stale')} stale, {c.count('missing')} missing"
               + (f"; {result.unaligned} translated slots line up with no English" if result.unaligned else ""))
@@ -98,7 +99,7 @@ def _status(args) -> int:
     plugin = Plugin.open(args.plugin)
     rows = plugin_status(plugin, Path(args.align_dir) if args.align_dir else None)
     if args.json:
-        print(json.dumps([{"page": r.page, "state": r.state, "detail": r.detail,
+        print(json.dumps([{"page": r.page, "state": r.state, "detail": r.detail, "reverse": r.reverse,
                            **({k: r.comparison.count(k) for k in ("current", "stale", "missing", "skip")}
                               if r.comparison and r.comparison.states else {})} for r in rows], indent=1))
         return 0
@@ -113,7 +114,7 @@ def _status(args) -> int:
             counts = f"{c.count('stale')} stale, {c.count('missing')} missing"
             if c.edited:
                 counts += f", {len(c.edited)} edited by hand"
-        print(f"{r.state:9s} {r.page}  {counts}{r.detail}")
+        print(f"{r.state:9s} {r.page}{' (written in Chinese first)' if r.reverse else ''}  {counts}{r.detail}")
     print(", ".join(f"{v} {k}" for k, v in sorted(totals.items())) + f" ({len(rows)} pages)")
     return 0
 
@@ -146,22 +147,18 @@ def _translate(args) -> int:
         profile.concurrency = args.concurrency
     model = profile.model if profile else (args.model or "")
     cache = Cache(enabled=not args.no_cache and bool(model))
-    pages = plugin.pages()
-    if args.page:
-        unknown = sorted(set(args.page) - set(pages))
-        if unknown:
-            raise ValueError(f"not an English manual of this plugin: {', '.join(unknown)} (paths are relative to Docs/)")
-        pages = [p for p in pages if p in args.page]
-    plans, jobs = translate.plan(plugin, pages, cache, model, reuse=not args.no_reuse, rebuild=args.rebuild)
-    for p in plans:
-        if p.note:
-            print(f"  skipped {p.page}: {p.note}")
+    work = translate.plan_all(plugin, cache, model, args.page, reuse=not args.no_reuse, rebuild=args.rebuild)
+    all_jobs = {key: job for w in work for key, job in w.jobs.items()}
+    for w in work:
+        for p in w.plans:
+            if p.note:
+                print(f"  skipped {p.page}: {p.note}")
     if args.export:
-        count = translate.export_jobs(jobs, Path(args.export))
+        count = translate.export_jobs(all_jobs, Path(args.export))
         print(f"{count} slots written to {args.export}; fill in the answers, then run with --answers {args.export}")
         return 0
     if args.answers:
-        accepted, problems = translate.apply_answers(jobs, Path(args.answers))
+        accepted, problems = translate.apply_answers(all_jobs, Path(args.answers))
         print(f"{accepted} answers accepted")
         for line in problems:
             print(f"  refused {line}")
@@ -169,40 +166,46 @@ def _translate(args) -> int:
             return 1
     client = Client(profile, cache) if profile else None
     if profile is not None:
-        est = translate.estimate(plans, jobs, profile, client if profile.type == "OpenCodeGo" else None,
-                                 translate.system_prompt(plugin))
-        todo = est.jobs - est.cached
+        print(f"{profile.describe()}")
+        todo = 0
+        for w in work:
+            est = translate.estimate(w.plans, w.jobs, profile, client if profile.type == "OpenCodeGo" else None,
+                                     translate.system_prompt(plugin, w.direction.target_lang))
+            todo += est.jobs - est.cached
+            print(f"{w.direction.label}: {est.pages} pages to write; {est.jobs} slots to translate "
+                  f"({est.cached} already cached), {est.reused} copied from identical text elsewhere")
+            if est.jobs - est.cached:
+                cost = f", about ${est.cost:.2f}" if est.cost is not None else ""
+                print(f"  to send: {est.jobs - est.cached} slots, {est.chars:,} characters in about {est.requests} requests "
+                      f"(~{est.input_tokens:,} input / ~{est.output_tokens:,} output tokens{cost})")
         if args.limit is not None:
             todo = min(todo, args.limit)
-        print(f"{profile.describe()}")
-        print(f"{est.pages} pages to write; {est.jobs} slots to translate ({est.cached} already cached), "
-              f"{est.reused} copied from identical English elsewhere")
-        if todo:
-            cost = f", about ${est.cost:.2f}" if est.cost is not None else ""
-            print(f"to send: {todo} slots, {est.chars:,} characters in about {est.requests} requests "
-                  f"(~{est.input_tokens:,} input / ~{est.output_tokens:,} output tokens{cost})")
         if args.dry_run:
             return 0
         if todo and not args.yes and not translate.confirm(f"send {todo} slots to {profile.name}?"):
             return 1
     elif args.dry_run:
-        print(f"{sum(1 for j in jobs.values() if j.result is None)} slots to translate; offline: nothing is sent")
+        print(f"{sum(1 for j in all_jobs.values() if j.result is None)} slots to translate; offline: nothing is sent")
         return 0
-    summary = translate.run(plugin, profile, plans, jobs, client, cache, args.limit,
-                            log=lambda line: print(line, file=sys.stderr))
-    sent = f"; {client.requests} requests, {client.input_tokens:,} input / {client.output_tokens:,} output tokens" \
-        if client else " (offline)"
-    print(f"wrote {len(summary.written)} pages; {summary.sent} slots translated, {summary.cached} from the cache, "
-          f"{summary.reused} copied{sent}")
-    for page, left in summary.unfinished:
-        print(f"  not written {page}: {left} slots still untranslated")
-    if offline:
-        return 0  # Pages still waiting for a translation are expected without a translator.
-    for line in summary.failures[:20]:
-        print(f"  failed {line}")
-    if summary.stopped:
-        print(f"stopped: {summary.stopped}")
-    return 1 if summary.unfinished or summary.stopped else 0
+    failed = False
+    for w in work:
+        summary = translate.run(plugin, profile, w.plans, w.jobs, client, cache, args.limit,
+                                log=lambda line: print(line, file=sys.stderr))
+        print(f"{w.direction.label}: wrote {len(summary.written)} pages; {summary.sent} slots translated, "
+              f"{summary.cached} from the cache, {summary.reused} copied")
+        for page, left in summary.unfinished:
+            print(f"  not written {page}: {left} slots still untranslated")
+        if not offline:
+            for line in summary.failures[:20]:
+                print(f"  failed {line}")
+            if summary.stopped:
+                print(f"stopped: {summary.stopped}")
+                failed = True
+                break
+            failed = failed or bool(summary.unfinished)
+    if client:
+        print(f"{client.requests} requests, {client.input_tokens:,} input / {client.output_tokens:,} output tokens")
+    return 1 if failed and not offline else 0
 
 
 def _site(args) -> int:

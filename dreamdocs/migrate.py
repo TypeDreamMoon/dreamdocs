@@ -22,14 +22,14 @@ from pathlib import Path
 from . import inline
 from .align import Alignment, Comparison, Row, SlotState, compare, translatable
 from .markdown import Doc, digest, parse, squash
-from .plugin import Plugin, read
+from .plugin import Direction, Plugin, read
 
 
 def _structure(doc: Doc) -> list[str]:
     return [f"{s.signature}|{inline.anchor_tokens(' '.join(s.texts))}" for s in doc.slots]
 
 
-def line_up(source: Doc, translated: Doc, by_position: bool = False) -> tuple[dict[int, int], int]:
+def line_up(source: Doc, translated: Doc, by_position: bool = False, lang: str = "en") -> tuple[dict[int, int], int]:
     """Map translated slot index -> source slot index; also return how many pairs were rejected.
 
     by_position: inside a run that differs, pair slots one to one when both sides have
@@ -50,7 +50,7 @@ def line_up(source: Doc, translated: Doc, by_position: bool = False) -> tuple[di
     rejected = 0
     for j, i in list(pairs.items()):
         # Prose with nothing to translate must come through unchanged; if it did not, the pair is wrong.
-        if not translatable(source.slots[i]) and [squash(t) for t in source.slots[i].texts] != \
+        if not translatable(source.slots[i], lang) and [squash(t) for t in source.slots[i].texts] != \
                 [squash(t) for t in translated.slots[j].texts]:
             del pairs[j]
             rejected += 1
@@ -78,19 +78,22 @@ class PluginResult:
     pages: list[PageResult] = field(default_factory=list)
 
 
-def migrate_page(plugin: Plugin, page: str, adopt: bool = False) -> PageResult:
+def migrate_page(plugin: Plugin, page: str, adopt: bool = False, direction: Direction | None = None) -> PageResult:
     """Line a translation up with the English it was made from and build its table.
 
     adopt: the translation was written by hand for today's English (no record says
     otherwise); its slots that line up count as current, made by a person.
+    direction: which side is the original (default: English -> the target language).
     """
-    english = parse(read(plugin.english(page)))
-    zh_path = plugin.translation(page)
+    direction = direction or Direction(plugin)
+    lang = direction.source_lang
+    english = parse(read(direction.source(page)))
+    zh_path = direction.translation(page)
     if not zh_path.exists():
-        return PageResult(page, "missing", english=english, comparison=untranslated(english))
+        return PageResult(page, "missing", english=english, comparison=untranslated(english, lang))
     translated = parse(read(zh_path))
     record_path = plugin.legacy_record(page)
-    record = json.loads(read(record_path)) if record_path.exists() else {}
+    record = json.loads(read(record_path)) if record_path.exists() and not direction.reverse else {}
     if adopt:
         source, verified, rev = english, True, plugin.revision()
         record = {}
@@ -99,9 +102,9 @@ def migrate_page(plugin: Plugin, page: str, adopt: bool = False) -> PageResult:
     else:
         # Imported without the English it was made from: assume today's English, never trust it as current.
         source, verified, rev = english, False, ""
-    pairs, rejected = line_up(source, translated, by_position=adopt)
+    pairs, rejected = line_up(source, translated, by_position=adopt, lang=lang)
     origin = "m" if record.get("origin") == "ai" else "h"
-    table = Alignment(f"Docs/{page}", rev[:12])
+    table = Alignment(direction.source(page).relative_to(plugin.root).as_posix(), rev[:12])
     if record.get("model"):
         table.extra["model"] = record["model"]
     if verified:
@@ -112,7 +115,7 @@ def migrate_page(plugin: Plugin, page: str, adopt: bool = False) -> PageResult:
             table.rows.append(Row(slot.signature, "-", slot.text_key, origin))
             continue
         en = source.slots[i].key if verified else "~" + source.slots[i].key
-        table.rows.append(Row(slot.signature, en, slot.text_key, "s" if not translatable(source.slots[i]) else origin))
+        table.rows.append(Row(slot.signature, en, slot.text_key, "s" if not translatable(source.slots[i], lang) else origin))
     # The old pipeline gave every translation a title and description, also when the English had no
     # frontmatter. Those extra slots have no English to line up with and are not lost structure.
     added = 0 if any(s.kind == "meta" for s in source.slots) else \
@@ -122,12 +125,12 @@ def migrate_page(plugin: Plugin, page: str, adopt: bool = False) -> PageResult:
     result = PageResult(page, "tracked" if verified else "unverified", lined="exact" if exact else "partial",
                         slots=len(translated.slots), unaligned=unaligned, rejected=rejected, added_meta=added,
                         table=table, english=english)
-    result.comparison = compare(table, english, translated)
+    result.comparison = compare(table, english, translated, lang)
     return result
 
 
-def untranslated(english: Doc) -> Comparison:
-    return Comparison([SlotState(n, "missing" if translatable(s) else "skip") for n, s in enumerate(english.slots)])
+def untranslated(english: Doc, lang: str = "en") -> Comparison:
+    return Comparison([SlotState(n, "missing" if translatable(s, lang) else "skip") for n, s in enumerate(english.slots)])
 
 
 def migrate(plugin: Plugin) -> PluginResult:

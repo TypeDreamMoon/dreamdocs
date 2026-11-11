@@ -204,6 +204,15 @@ class SiteSyncTests(unittest.TestCase):
         self.assertEqual(self.status(), "unreviewed")
         self.assertIn("导入的旧中文。", self.zh())
 
+    def test_page_written_in_chinese_first_publishes_both_and_is_current(self):
+        site.write(self.plugin / "Docs/dreamdocs.json", '{"version": 2, "chineseOriginal": ["guide.md"]}')
+        site.write(self.plugin / "Docs/zh-CN/guide.md", "# 指南\n\n中文原文。\n")
+        site.write(self.plugin / "Docs/guide.md", "# Guide\n\nEnglish made from the Chinese.\n")
+        self.sync(adopt_existing=True)
+        self.assertEqual(self.status(), "current")
+        self.assertIn("中文原文。", self.zh())
+        self.assertIn("English made from the Chinese.", site.read(self.root / "content/docs/guide.en.md"))
+
     def test_existing_site_chinese_needs_explicit_adoption_and_never_in_ci(self):
         self.sync()
         translate_plugin(self.plugin)

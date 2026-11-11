@@ -22,7 +22,7 @@ from .align import Alignment, Row, compare
 from .cache import Cache, job_key
 from .markdown import ANCHOR, EXPLICIT_ID, Doc, Slot, digest, escape, parse, squash
 from .migrate import untranslated
-from .plugin import Plugin, read
+from .plugin import Direction, Plugin, read
 from .profiles import Profile
 from .providers import Busy, Client, ProviderError, Stop, parse_json_reply
 
@@ -61,6 +61,7 @@ class PagePlan:
     note: str = ""
     edited: bool = False
     layout_changed: bool = False
+    direction: Direction | None = None
 
     @property
     def needs_write(self) -> bool:
@@ -100,12 +101,13 @@ def _sections(doc: Doc) -> list[str]:
     return out
 
 
-def _old_english(plugin: Plugin, table: Alignment, page: str) -> dict[str, str]:
-    """English slot text by fingerprint, from the revision the translation was aligned with."""
+def _old_english(plugin: Plugin, table: Alignment, source: Path) -> dict[str, str]:
+    """Original slot text by fingerprint, from the revision the translation was aligned with."""
     if not table.rev:
         return {}
     try:
-        text = subprocess.run(["git", "-C", str(plugin.root), "show", f"{table.rev}:Docs/{page}"],
+        rel = source.relative_to(plugin.root).as_posix()
+        text = subprocess.run(["git", "-C", str(plugin.root), "show", f"{table.rev}:{rel}"],
                               capture_output=True, check=True).stdout.decode("utf-8")
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
         return {}
@@ -113,29 +115,39 @@ def _old_english(plugin: Plugin, table: Alignment, page: str) -> dict[str, str]:
 
 
 def plan(plugin: Plugin, pages: list[str], cache: Cache, model: str, reuse: bool = True,
-         rebuild: bool = False) -> tuple[list[PagePlan], dict[str, Job]]:
+         rebuild: bool = False, direction: Direction | None = None) -> tuple[list[PagePlan], dict[str, Job]]:
+    direction = direction or Direction(plugin)
+    lang = direction.source_lang
     plans: list[PagePlan] = []
     pending: list[tuple[PagePlan, int, str]] = []   # (plan, slot index, previous translation index or "")
 
     def exists(relative: str) -> bool:
         return (plugin.root / "Docs" / relative).exists()
 
+    chinese = {pg for pg in plugin.pages() if plugin.translation(pg).exists()} | set(plugin.reverse_pages())
+
+    def as_source(text: str, page: str) -> str:
+        # Kept translations are stored with links as the original writes them; the page is re-pointed as a whole.
+        if direction.reverse:
+            return links.relocate(text, page, plugin.target, chinese)
+        return links.to_source(text, page, plugin.target, exists)
+
     for page in pages:
-        english = parse(read(plugin.english(page)))
-        p = PagePlan(page, english)
+        english = parse(read(direction.source(page)))
+        p = PagePlan(page, english, direction=direction)
         plans.append(p)
         if page in plugin.manual:
             p.note = "manual page: translate it by hand"
             continue
-        zh_path = plugin.translation(page)
-        states = untranslated(english).states
+        zh_path = direction.translation(page)
+        states = untranslated(english, lang).states
         if zh_path.exists():
-            table_path = plugin.alignment(page)
+            table_path = direction.alignment(page)
             if not table_path.exists():
                 p.note = "has a translation but no alignment table: run dreamdocs migrate --write first"
                 continue
             p.translated, p.table = parse(read(zh_path)), Alignment.read(table_path)
-            comparison = compare(p.table, english, p.translated)
+            comparison = compare(p.table, english, p.translated, lang)
             if comparison.mismatch:
                 p.note = f"translation no longer matches its table ({comparison.mismatch}); fix the page or mark it manual"
                 continue
@@ -148,15 +160,14 @@ def plan(plugin: Plugin, pages: list[str], cache: Cache, model: str, reuse: bool
             if s.state == "skip":
                 p.fill[s.index] = (list(slot.texts), "s")
             elif s.state == "current":
-                # Kept text is stored with links as the English writes them; the page is re-pointed as a whole.
-                kept = [links.to_source(t, page, plugin.target, exists) for t in p.translated.slots[s.old].texts]
+                kept = [as_source(t, page) for t in p.translated.slots[s.old].texts]
                 p.fill[s.index] = (kept, "h" if s.edited else p.table.rows[s.old].origin)
             else:
                 previous = ""
                 if s.old is not None and p.translated is not None:
                     previous = " | ".join(p.translated.slots[s.old].texts)
                     if old_english is None:
-                        old_english = _old_english(plugin, p.table, page)
+                        old_english = _old_english(plugin, p.table, direction.source(page))
                     source = old_english.get(p.table.rows[s.old].known or "", "")
                     previous = json.dumps([previous, source], ensure_ascii=False)
                 pending.append((p, s.index, previous))
@@ -178,7 +189,7 @@ def plan(plugin: Plugin, pages: list[str], cache: Cache, model: str, reuse: bool
             continue
         masked, values = [], []
         for text in slot.texts:
-            if inline.translatable(text):
+            if inline.translatable(text, lang):
                 m, v = inline.mask(text, plugin.codes)
                 masked.append(m)
                 values.append(v)
@@ -199,7 +210,7 @@ def plan(plugin: Plugin, pages: list[str], cache: Cache, model: str, reuse: bool
                 job.before = squash(" | ".join(p.english.slots[index - 1].texts))[:300]
             if previous:
                 job.previous_translation, job.previous_source = json.loads(previous)
-            cached = cache.get(model, plugin.target, key)
+            cached = cache.get(model, direction.target_lang, key)
             if cached is not None and len(cached) == len(slot.texts):
                 job.result, job.cached = cached, True
             jobs[key] = job
@@ -209,7 +220,8 @@ def plan(plugin: Plugin, pages: list[str], cache: Cache, model: str, reuse: bool
 
 # -- one batch ------------------------------------------------------------------
 
-def _glossary(plugin: Plugin) -> dict[str, str]:
+def _glossary(plugin: Plugin, reverse: bool = False) -> dict[str, str]:
+    """English term -> Chinese; reversed (Chinese -> English) for Chinese originals. Words kept as is map to themselves."""
     terms = json.loads((PACKAGE / "glossary" / f"base.{plugin.target}.json").read_text(encoding="utf-8")) \
         if (PACKAGE / "glossary" / f"base.{plugin.target}.json").exists() else {}
     own = plugin.mirror / ".dreamdocs" / "glossary.json"
@@ -217,12 +229,18 @@ def _glossary(plugin: Plugin) -> dict[str, str]:
         terms.update(json.loads(own.read_text(encoding="utf-8")))
     for word in plugin.config.get("keep", []):
         terms[word] = word
+    if reverse:
+        flipped = {}
+        for english, chinese in terms.items():
+            flipped.setdefault(chinese, english)
+        terms = flipped
     return terms
 
 
-def system_prompt(plugin: Plugin) -> str:
-    text = (PACKAGE / "prompts" / f"translate.{plugin.target}.md").read_text(encoding="utf-8")
-    own = plugin.mirror / ".dreamdocs" / "prompt.md"
+def system_prompt(plugin: Plugin, target_lang: str | None = None) -> str:
+    target_lang = target_lang or plugin.target
+    text = (PACKAGE / "prompts" / f"translate.{target_lang}.md").read_text(encoding="utf-8")
+    own = plugin.mirror / ".dreamdocs" / ("prompt.md" if target_lang == plugin.target else f"prompt.{target_lang}.md")
     if own.exists():
         text += "\n\nProject notes:\n\n" + own.read_text(encoding="utf-8")
     return text
@@ -230,7 +248,8 @@ def system_prompt(plugin: Plugin) -> str:
 
 def request_body(jobs: list[Job], glossary: dict[str, str], title: str) -> str:
     text = " ".join(m for j in jobs for m in j.masked if m) + " " + " ".join(j.previous_source for j in jobs)
-    hits = {k: v for k, v in glossary.items() if re.search(r"(?<![\w-])" + re.escape(k) + r"(?![\w-])", text, re.I)}
+    hits = {k: v for k, v in glossary.items()
+            if (k in text if inline.CJK.search(k) else re.search(r"(?<![\w-])" + re.escape(k) + r"(?![\w-])", text, re.I))}
     slots = []
     for j in jobs:
         entry = {"id": j.id, "kind": KIND_NAMES[j.slot.kind]}
@@ -308,13 +327,15 @@ def accept(job: Job, answer) -> tuple[list[str] | None, str]:
 
 
 class Run:
-    def __init__(self, plugin: Plugin, profile: Profile, client: Client, cache: Cache, log=print):
+    def __init__(self, plugin: Plugin, profile: Profile, client: Client, cache: Cache, log=print,
+                 direction: Direction | None = None):
         self.plugin, self.profile, self.client, self.cache, self.log = plugin, profile, client, cache, log
+        self.direction = direction or Direction(plugin)
         self.stop = threading.Event()
         self.stop_reason = ""
         self.lock = threading.Lock()
-        self.system = system_prompt(plugin)
-        self.glossary = _glossary(plugin)
+        self.system = system_prompt(plugin, self.direction.target_lang)
+        self.glossary = _glossary(plugin, self.direction.reverse)
         self.run_id = uuid.uuid4().hex[:8]
         self.sent = 0
         self.failures: list[str] = []
@@ -365,7 +386,7 @@ class Run:
                 left.append(job)
                 continue
             job.result, job.problem = texts, ""
-            self.cache.put(self.profile.model, self.plugin.target, job.key, texts)
+            self.cache.put(self.profile.model, self.direction.target_lang, job.key, texts)
             with self.lock:
                 self.sent += 1
         return left
@@ -436,6 +457,13 @@ def assemble(p: PagePlan, plugin: Plugin, translated_pages: set[str]) -> tuple[s
             texts.append(value)
             origins.append(origin)
     values = {i: [escape(slot, t) for t in texts[i]] for i, slot in enumerate(p.english.slots)}
+    if p.direction is not None and p.direction.reverse:
+        # The English copy of a Chinese original: English anchors come from English headings, and
+        # links point at the English pages (or stay on a Chinese-only file).
+        out = p.english.render(values)
+        english = set(plugin.pages()) | set(plugin.chinese_original)
+        out = links.to_source(out, p.page, plugin.target, lambda rel: rel in english or (plugin.root / "Docs" / rel).exists())
+        return out, origins
     out = p.english.render(values, heading_anchors(p.english))
     out = links.relocate(out, p.page, plugin.target, translated_pages)
     return out, origins
@@ -449,7 +477,8 @@ def write_page(p: PagePlan, plugin: Plugin, translated_pages: set[str], model: s
     found = check.problems(zh)
     if found:
         raise ValueError(f"{p.page}: the rebuilt translation fails the self-check: {found[0]}")
-    table = Alignment(f"Docs/{p.page}", plugin.revision()[:12])
+    direction = p.direction or Direction(plugin)
+    table = Alignment(direction.source(p.page).relative_to(plugin.root).as_posix(), plugin.revision()[:12])
     table.extra["page"] = page_hash(p.english)
     old_model = p.table.extra.get("model", "") if p.table else ""
     if p.waiting and model:
@@ -457,10 +486,10 @@ def write_page(p: PagePlan, plugin: Plugin, translated_pages: set[str], model: s
     elif old_model:
         table.extra["model"] = old_model
     table.rows = [Row(e.signature, e.key, z.text_key, o) for e, z, o in zip(p.english.slots, zh.slots, origins)]
-    path = plugin.translation(p.page)
+    path = direction.translation(p.page)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(out, encoding="utf-8", newline="\n")
-    table.write(plugin.alignment(p.page))
+    table.write(direction.alignment(p.page))
 
 
 # -- the whole run ----------------------------------------------------------------
@@ -556,7 +585,8 @@ def run(plugin: Plugin, profile: Profile | None, plans: list[PagePlan], jobs: di
     if limit is not None:
         todo = todo[:limit]
     titles = {p.page: next((squash(s.texts[0]) for s in p.english.slots if s.kind in ("h", "meta")), p.page) for p in plans}
-    runner = Run(plugin, profile, client, cache, log) if profile is not None else None
+    direction = next((p.direction for p in plans if p.direction is not None), None)
+    runner = Run(plugin, profile, client, cache, log, direction) if profile is not None else None
     rounds = [batches(todo, profile.chunk_chars)] if profile is not None else [[]]
     for attempt in range((profile.retry + 1) if profile is not None else 0):
         groups = rounds[-1]
@@ -591,6 +621,30 @@ def run(plugin: Plugin, profile: Profile | None, plans: list[PagePlan], jobs: di
         else:
             summary.unfinished.append((p.page, sum(1 for j in p.waiting.values() if j.result is None)))
     return summary
+
+
+@dataclass
+class Work:
+    """The plan for one direction: English originals, or pages written in Chinese first."""
+    direction: Direction
+    plans: list[PagePlan]
+    jobs: dict[str, Job]
+
+
+def plan_all(plugin: Plugin, cache: Cache, model: str, pages: list[str] | None = None, reuse: bool = True,
+             rebuild: bool = False) -> list[Work]:
+    """Plan both directions; pages (relative to Docs/) narrows the run to those pages."""
+    known = {page for d in plugin.directions() for page in d.pages()}
+    unknown = sorted(set(pages or ()) - known)
+    if unknown:
+        raise ValueError(f"not a page of this plugin: {', '.join(unknown)} (paths are relative to Docs/)")
+    work = []
+    for direction in plugin.directions():
+        chosen = [p for p in direction.pages() if not pages or p in pages]
+        if chosen:
+            plans, jobs = plan(plugin, chosen, cache, model, reuse, rebuild, direction)
+            work.append(Work(direction, plans, jobs))
+    return work
 
 
 def confirm(question: str) -> bool:

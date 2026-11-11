@@ -85,34 +85,42 @@ def check_plugin(root: Path, strict: bool = False) -> PluginReport:
     tree = check_tree(plugin.root / "Docs")
     for name, found in tree.failures.items():
         report.errors.append(f"Docs/{name}: {found[0]}")
-    pages = plugin.pages()
-    report.pages = len(pages)
-    for page in pages:
-        status = page_status(plugin, page)
-        if status.state == "untracked":
-            report.errors.append(f"Docs/{plugin.target}/{page}: a translation without an alignment table (dreamdocs migrate --write)")
-        elif status.state == "mismatch":
-            report.errors.append(f"Docs/{plugin.target}/{page}: no longer matches its alignment table ({status.detail})")
-        elif status.state in ("outdated", "missing"):
-            stale = status.comparison.count("stale") + status.comparison.count("missing") if status.comparison else 0
-            note = f"Docs/{plugin.target}/{page}: {status.state}" + (f", {stale} paragraphs to translate" if stale else "") + \
-                (f" ({status.detail})" if status.detail else "")
-            (report.errors if strict and status.state == "outdated" else report.warnings).append(note)
-    english = set(pages)
+    for page in plugin.chinese_original:
+        if not (plugin.mirror / page).exists():
+            report.errors.append(f"Docs/{plugin.target}/{page}: listed in chineseOriginal but there is no such Chinese page")
+    for direction in plugin.directions():
+        pages = direction.pages()
+        report.pages += len(pages)
+        for page in pages:
+            status = page_status(plugin, page, direction=direction)
+            where = direction.translation_display(page)
+            if status.state == "untracked":
+                report.errors.append(f"{where}: a translation without an alignment table (dreamdocs adopt or migrate --write)")
+            elif status.state == "mismatch":
+                report.errors.append(f"{where}: no longer matches its alignment table ({status.detail})")
+            elif status.state in ("outdated", "missing"):
+                stale = status.comparison.count("stale") + status.comparison.count("missing") if status.comparison else 0
+                note = f"{where}: {status.state}" + (f", {stale} paragraphs to translate" if stale else "") + \
+                    (f" ({status.detail})" if status.detail else "")
+                (report.errors if strict and status.state == "outdated" else report.warnings).append(note)
+    english = set(plugin.pages())
+    originals = set(plugin.chinese_original)
     for path in sorted(plugin.mirror.rglob("*.md")):
         relative = path.relative_to(plugin.mirror).as_posix()
         if relative.startswith("."):
             continue
-        if not (plugin.root / "Docs" / relative).exists():
-            report.errors.append(f"Docs/{plugin.target}/{relative}: a translation of no English page")
+        if relative not in originals and not (plugin.root / "Docs" / relative).exists():
+            report.errors.append(f"Docs/{plugin.target}/{relative}: a translation of no English page "
+                                 f"(a page written in Chinese first goes into chineseOriginal)")
         for url in _broken_links(path, path.read_text(encoding="utf-8")):
             (report.errors if strict else report.warnings).append(f"Docs/{plugin.target}/{relative}: broken link {url}")
-    tables = plugin.mirror / ".align"
-    if tables.exists():
-        for path in sorted(tables.rglob("*.tsv")):
-            page = path.relative_to(tables).as_posix()[:-4]
-            if page not in english:
-                report.errors.append(f"Docs/{plugin.target}/.align/{page}.tsv: a table for no English page")
+    for tables, known, where in ((plugin.mirror / ".align", english, f"Docs/{plugin.target}/.align"),
+                                 (plugin.root / "Docs" / ".align", originals, "Docs/.align")):
+        if tables.exists():
+            for path in sorted(tables.rglob("*.tsv")):
+                page = path.relative_to(tables).as_posix()[:-4]
+                if page not in known:
+                    report.errors.append(f"{where}/{page}.tsv: a table for no original page")
     return report
 
 

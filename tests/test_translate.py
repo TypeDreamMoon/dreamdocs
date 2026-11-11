@@ -272,6 +272,96 @@ class TranslateTests(unittest.TestCase):
         self.assertEqual(self.server.requests, [])
 
 
+ZH_PAGE = """# 社区贡献
+
+用 `DreamShader` 写材质，参见[类型](../types.md)。
+
+- 第一条
+- 第二条
+"""
+
+
+class ReverseTests(unittest.TestCase):
+    """Pages written in Chinese first: the English copy is the translation."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "Plugin"
+        (self.root / "Docs/zh-CN/community").mkdir(parents=True)
+        (self.root / "Docs/types.md").write_text(PAGE_A.replace("guide/b.md#setup", "types.md"), encoding="utf-8")
+        (self.root / "Docs/zh-CN/community/share.md").write_text(ZH_PAGE, encoding="utf-8")
+        (self.root / "Docs/dreamdocs.json").write_text(json.dumps(
+            {"version": 2, "chineseOriginal": ["community/share.md"]}), encoding="utf-8")
+        self.server = FakeProvider()
+        self.cache = Cache(Path(self.tmp.name) / "cache")
+        self.profile = Profile("fake", "OpenAI", self.server.url, "fake-model", api_key="sk-test-123", concurrency=1)
+
+    def tearDown(self):
+        self.server.close()
+        self.tmp.cleanup()
+
+    def run_all(self, pages=None):
+        plugin = Plugin.open(self.root)
+        client = Client(self.profile, self.cache)
+        summaries = [translate.run(plugin, self.profile, w.plans, w.jobs, client, self.cache, log=quiet)
+                     for w in translate.plan_all(plugin, self.cache, self.profile.model, pages)]
+        return summaries, plugin
+
+    def test_both_directions_are_planned_and_written(self):
+        plugin = Plugin.open(self.root)
+        self.assertEqual(plugin.pages(), ["types.md"])
+        self.assertEqual(plugin.reverse_pages(), ["community/share.md"])
+        summaries, plugin = self.run_all()
+        self.assertEqual([s.written for s in summaries], [["types.md"], ["community/share.md"]])
+        english = (self.root / "Docs/community/share.md").read_text(encoding="utf-8")
+        self.assertIn("# 译社区贡献", english)
+        self.assertIn("[类型](../types.md)", english)   # Links back to the English page beside it.
+        self.assertNotIn('<a id=', english)
+        self.assertIn("- 译第二条", english)
+        self.assertTrue((self.root / "Docs/.align/community/share.md.tsv").exists())
+        self.assertFalse((self.root / "Docs/zh-CN/.align/community/share.md.tsv").exists())
+        # The English copy is not picked up as an original to translate back.
+        self.assertEqual(Plugin.open(self.root).pages(), ["types.md"])
+        reverse = next(d for d in plugin.directions() if d.reverse)
+        self.assertEqual(page_status(plugin, "community/share.md", direction=reverse).state, "current")
+        prompts = [r["body"]["messages"][0]["content"] for r in self.server.requests]
+        self.assertTrue(any("from Simplified Chinese into English" in p for p in prompts))
+        self.assertTrue(any("into Simplified Chinese" in p for p in prompts))
+
+    def test_changed_chinese_sends_only_that_paragraph(self):
+        self.run_all()
+        self.server.requests.clear()
+        (self.root / "Docs/zh-CN/community/share.md").write_text(ZH_PAGE.replace("第二条", "第二条（改）"),
+                                                                 encoding="utf-8")
+        plugin = Plugin.open(self.root)
+        reverse = next(d for d in plugin.directions() if d.reverse)
+        self.assertEqual(page_status(plugin, "community/share.md", direction=reverse).state, "outdated")
+        summaries, _ = self.run_all(["community/share.md"])
+        sent = self.server.sent_slots()
+        self.assertEqual([s["text"] for s in sent], ["第二条（改）"])
+        self.assertEqual(sent[0]["previous_translation"], "译第二条")
+        self.assertIn("- 译第二条（改）", (self.root / "Docs/community/share.md").read_text(encoding="utf-8"))
+
+    def test_check_and_status_know_both_directions(self):
+        from dreamdocs import check
+        from dreamdocs.status import plugin_status
+        self.run_all()
+        report = check.check_plugin(self.root)
+        self.assertEqual(report.errors, [])
+        rows = {(r.page, r.reverse): r.state for r in plugin_status(Plugin.open(self.root))}
+        self.assertEqual(rows, {("types.md", False): "current", ("community/share.md", True): "current"})
+        (self.root / "Docs/dreamdocs.json").write_text(json.dumps(
+            {"version": 2, "chineseOriginal": ["community/share.md", "community/gone.md"]}), encoding="utf-8")
+        (self.root / "Docs/.align/stray.md.tsv").write_text("#dreamdocs-align 1\n", encoding="utf-8")
+        joined = "\n".join(check.check_plugin(self.root).errors)
+        self.assertIn("community/gone.md: listed in chineseOriginal", joined)
+        self.assertIn("Docs/.align/stray.md.tsv: a table for no original page", joined)
+
+    def test_unknown_page_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "not a page of this plugin"):
+            translate.plan_all(Plugin.open(self.root), self.cache, "m", ["nope.md"])
+
+
 class ProfileTests(unittest.TestCase):
     def test_dreamloc_file_with_dreamdocs_keys(self):
         text = ("; personal\n[Profile ocgo]\nType=OpenCodeGo\nModel=deepseek-v4.1-flash ; cheap\nApiKeyEnv=OCGO\n"

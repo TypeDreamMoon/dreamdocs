@@ -56,10 +56,17 @@ def check_placeholders(masked: str, translated: str) -> str | None:
     return "; ".join(parts)
 
 
-def translatable(text: str) -> bool:
-    """Whether anything is left to translate once the frozen spans are taken out."""
+CJK = re.compile(r"[㐀-鿿豈-﫿぀-ヿ가-힯]")
+
+
+def translatable(text: str, lang: str = "en") -> bool:
+    """Whether anything is left to translate once the frozen spans are taken out.
+
+    English needs a word of two letters; Chinese (or any CJK source) needs a CJK character.
+    """
     masked, _ = mask(text)
-    return bool(WORD.search(PLACEHOLDER.sub(" ", masked)))
+    rest = PLACEHOLDER.sub(" ", masked)
+    return bool((WORD if lang == "en" else CJK).search(rest))
 
 
 def anchor_tokens(text: str) -> str:
