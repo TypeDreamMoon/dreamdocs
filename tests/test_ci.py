@@ -18,7 +18,7 @@ from dreamdocs.profiles import env_profile  # noqa: E402
 
 
 def git(cwd, *args):
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
 
 
 @unittest.skipUnless(shutil.which("git"), "needs git")
