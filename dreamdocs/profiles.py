@@ -147,13 +147,20 @@ def parse_profiles(text: str) -> tuple[dict[str, Profile], list[str]]:
 
 
 def env_profile() -> Profile | None:
-    """The CI profile from DOCS_AI_* variables, as the old site workflows set them."""
+    """The CI profile from DOCS_AI_* variables.
+
+    DOCS_AI_TYPE picks the service: OpenAI (the default; any OpenAI-compatible address in
+    DOCS_AI_BASE_URL, DeepSeek's for example), Anthropic, or OpenCodeGo (no address needed).
+    """
     if not os.environ.get("DOCS_AI_MODEL"):
         return None
-    profile = Profile("env", "OpenAI", (os.environ.get("DOCS_AI_BASE_URL") or "").rstrip("/"),
+    kind = os.environ.get("DOCS_AI_TYPE") or "OpenAI"
+    if kind.lower() not in TYPES:
+        raise ValueError(f"DOCS_AI_TYPE must be one of {', '.join(TYPES.values())}, not {kind!r}")
+    profile = Profile("env", TYPES[kind.lower()], (os.environ.get("DOCS_AI_BASE_URL") or "").rstrip("/"),
                       os.environ["DOCS_AI_MODEL"], api_key_env="DOCS_AI_API_KEY")
     api = os.environ.get("DOCS_AI_API_FORMAT", "")
-    profile.api = {"chat-completions": "chat", "responses": "responses", "messages": "messages"}.get(api, "chat")
+    profile.api = {"chat-completions": "chat", "chat": "chat", "responses": "responses", "messages": "messages"}.get(api, "")
     profile.json_mode = os.environ.get("DOCS_AI_JSON_MODE", "").lower() == "true"
     profile.token_field = os.environ.get("DOCS_AI_TOKEN_FIELD") or "max_tokens"
     if os.environ.get("DOCS_AI_EXTRA_BODY"):

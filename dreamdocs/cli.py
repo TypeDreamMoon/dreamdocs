@@ -233,6 +233,11 @@ def _site(args) -> int:
     return 0
 
 
+def _ci(args) -> int:
+    from . import ci
+    return ci.main(args)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="dreamdocs", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -287,6 +292,15 @@ def main(argv=None) -> int:
     p.add_argument("--export", metavar="FILE", help="write the slots still to translate to a JSON file and stop")
     p.add_argument("--answers", metavar="FILE", help="take translations filled into an exported file (implies --offline)")
     p.set_defaults(run=_translate)
+
+    p = sub.add_parser("ci", help="plugin GitHub Actions steps")
+    p.add_argument("action", choices=["translate"],
+                   help="translate: translate what is stale with the DOCS_AI_* profile and open or update a pull request")
+    p.add_argument("--plugin", default=".")
+    p.add_argument("--branch", default="dreamdocs/translate", help="the branch the translations go to")
+    p.add_argument("--base", default="main", help="the branch the pull request targets")
+    p.add_argument("--no-push", action="store_true", help="translate and check, but leave the result in the checkout")
+    p.set_defaults(run=_ci)
 
     p = sub.add_parser("profiles", help="list the translator profiles dreamdocs can use")
     p.set_defaults(run=_profiles)
