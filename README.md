@@ -33,6 +33,31 @@ tool version, excluded pages, identifiers never to translate (`keep`), diagnosti
 pages translated by hand (`manual`). `Docs/zh-CN/.dreamdocs/glossary.json` and `prompt.md` add to the built-in
 glossary and instructions. Edit a Chinese page directly to correct it; the next run notices and keeps the edit.
 
+A page written in Chinese first goes into `chineseOriginal` (paths relative to `Docs/zh-CN/`). Its Chinese is then the
+original: `translate` writes the English `Docs/<page>` from it, with the table in `Docs/.align/<page>.tsv`, and the
+documentation sites publish both. `prompt.en.md` next to `prompt.md` adds instructions for that direction.
+
+### Translating in CI
+
+Copy [`templates/plugin/docs-translate.yml`](templates/plugin/docs-translate.yml) to the plugin's
+`.github/workflows/`. After the manuals change on `main` it runs `dreamdocs ci translate`: translates what is stale in
+both directions with the profile from the `DOCS_AI_*` variables, runs `check --plugin`, and pushes the result to the
+`dreamdocs/translate` branch with one pull request, updated by later runs. Without a key it only warns. When someone
+else pushes to that branch, the workflow leaves it alone until it is merged or deleted. Merge the pull request with a
+merge commit, not a squash: the alignment tables record the commit they were made from.
+
+| Setting | Where | Value |
+|---|---|---|
+| `DOCS_AI_API_KEY` | secret | the translator's key |
+| `DOCS_AI_TYPE` | variable | `OpenAI` (any OpenAI-compatible service), `Anthropic` or `OpenCodeGo` |
+| `DOCS_AI_MODEL` | variable | for example `deepseek-v4.1-flash` (OpenCodeGo) or `deepseek-chat` |
+| `DOCS_AI_BASE_URL` | variable | OpenAI-compatible services only, for example `https://api.deepseek.com/v1` |
+| `DOCS_AI_MAX_SLOTS` | variable | at most this many paragraphs per run (default 3000); the next run continues |
+| `DOCS_BOT_TOKEN` | secret, optional | a token that may push and open pull requests, so the pull request runs the other checks too |
+
+Without `DOCS_BOT_TOKEN`, turn on *Allow GitHub Actions to create and approve pull requests* (Settings → Actions →
+General). `DOCS_AI_EXTRA_BODY` and `DOCS_AI_JSON_MODE` are read as well.
+
 ## Documentation sites
 
 A site keeps its page mapping in `docs-sync/config.json`, its own pages and the notes after
