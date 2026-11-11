@@ -340,6 +340,25 @@ class SiteSyncTests(unittest.TestCase):
         self.assertIn('title: "Plugin title"', english)
         self.assertNotIn("# Guide", english)
 
+    def test_links_to_a_stripped_title_go_to_the_page(self):
+        self.cfg["pages"].append({"id": "other", "format": "md", "title": "Other", "sources": [{"path": "Docs/other.md"}]})
+        self.cfg.update(stripLeadingTitle=True)
+        self.save()
+        site.write(self.plugin / "Docs/guide.md", "# Guide — `.dsg`\n\nEnglish paragraph.\n\n## Setup\n\nText.\n")
+        site.write(self.plugin / "Docs/other.md", "# Other\n\nSee [the guide](guide.md#guide--dsg) and "
+                                                  "[setup](guide.md#setup).\n")
+        self.sync()
+        other = site.read(self.root / "content/docs/other.en.md")
+        self.assertIn("[the guide](/en/docs/guide)", other)
+        self.assertIn("[setup](/en/docs/guide#setup)", other)
+        translate_plugin(self.plugin)
+        self.sync(adopt_existing=True)
+        self.assertNotIn("# 译Guide", self.zh())
+        self.assertTrue(self.zh().split("---\n", 2)[2].lstrip().startswith("中文段落。"))
+        other = self.zh("other")
+        self.assertIn("](/docs/guide)", other)
+        self.assertIn("](/docs/guide#setup)", other)
+
     def test_validate_catches_edited_output(self):
         self.first_import()
         self.assertEqual(site.validate(self.root), 1)

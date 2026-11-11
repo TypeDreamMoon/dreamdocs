@@ -206,7 +206,21 @@ def strip_leading_title(body):
     a site whose template renders DocsTitle from the same title would show two <h1>.
     Sites opt in with "stripLeadingTitle": true in docs-sync/config.json.
     """
-    return re.sub(r"\A# [^\n]*\n+(?=\S)", "", body, count=1)
+    return re.sub(r'\A\s*(?:<a (?:id|name)="[^"<>]+"></a>\s*\n)?# [^\n]*\n+(?=\S)', "", body, count=1)
+
+
+def leading_title_anchors(text):
+    """The IDs a page's leading level-1 heading answers to: its <a id>, its [#id] and its GitHub slug."""
+    body = split_frontmatter(text)[1].lstrip("\n")
+    match = re.match(r'(?:<a (?:id|name)="([^"<>]+)"></a>\s*\n)?# ([^\n]*)\n', body)
+    if not match:
+        return set()
+    title = match[2].strip()
+    explicit = re.search(r"\s+\[#([^\]]+)\]$", title)
+    plain = re.sub(r"\s+\[#[^\]]+\]$", "", title)
+    found = {re.sub(r"[^\w\s-]", "", plain.lower()).replace(" ", "-")}
+    found |= {a for a in (match[1], explicit[1] if explicit else None) if a}
+    return found
 
 
 def route(page_id, locale="en"):
@@ -233,13 +247,15 @@ def rewrite_links(body, source_path, repository, revision, source_routes, sectio
         if not parsed.path:
             if section and parsed.fragment:
                 return github + source_path + url
-            return urllib.parse.urlunsplit(parsed._replace(fragment=fragment(source_path, parsed.fragment)))
+            return urllib.parse.urlunsplit(parsed._replace(fragment=fragment(source_path, parsed.fragment))) or \
+                source_routes.get(source_path, url)
         path = str(Path(source_path).parent.joinpath(urllib.parse.unquote(parsed.path))).replace("\\", "/")
         import posixpath
         path = posixpath.normpath(path)
         suffix = ("?" + parsed.query if parsed.query else "") + ("#" + parsed.fragment if parsed.fragment else "")
         if path in source_routes:
-            return source_routes[path] + ("?" + parsed.query if parsed.query else "") + ("#" + fragment(path, parsed.fragment) if parsed.fragment else "")
+            kept = fragment(path, parsed.fragment) if parsed.fragment else ""
+            return source_routes[path] + ("?" + parsed.query if parsed.query else "") + ("#" + kept if kept else "")
         if path.startswith("../"):
             raise ValueError(f"Link leaves plugin: {source_path}: {url}")
         image = Path(path).suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif")
@@ -462,6 +478,13 @@ def sync(root, plugin, revision=None, check=False, adopt_existing=False):
     source_routes = {}
     anchors = {entry['path']: source_anchors(split_frontmatter(read(source_file(plugin, entry['path'])))[1])
                for page in definitions for entry in page['sources']}
+    if cfg.get("stripLeadingTitle"):
+        # The leading title is dropped, and its anchor with it: links to it go to the page itself.
+        for page in definitions:
+            entry = page["sources"][0]
+            if not any(entry.get(key) for key in ("heading", "headingPrefix", "diagnosticPrefix")):
+                for anchor in leading_title_anchors(read(source_file(plugin, entry["path"]))):
+                    anchors[entry["path"]][anchor] = ""
     for page in definitions:
         if page.get("locale", "en") == "en":
             for entry in page["sources"]:
@@ -556,6 +579,15 @@ def plan_chinese(root, plugin, cfg, definitions, pages, old, planned, removals, 
                 translated, _ = translation_files(plugin, entry['path'])
                 if translated.exists():
                     source_routes.setdefault(translated.relative_to(plugin).as_posix(), route(page['id'], 'zh'))
+    dropped = {}
+    if cfg.get('stripLeadingTitle'):
+        # As for the English: the leading title goes, and links to it go to the page itself.
+        for page in definitions:
+            entry = page['sources'][0]
+            translated, _ = translation_files(plugin, entry['path'])
+            if translated.exists() and not any(entry.get(k) for k in ('heading', 'headingPrefix', 'diagnosticPrefix')):
+                ids = leading_title_anchors(read(translated)) | leading_title_anchors(read(source_file(plugin, entry['path'])))
+                dropped[translated.relative_to(plugin).as_posix()] = {anchor: '' for anchor in ids}
     imported = []
     for definition in definitions:
         page_id = definition['id']
@@ -577,7 +609,7 @@ def plan_chinese(root, plugin, cfg, definitions, pages, old, planned, removals, 
             # Sections are selected against the English this Chinese page was laid out from.
             selected = select_translation(body, entry, aligned_english(plugin, entry['path'], table))
             bodies.append(rewrite_links(selected, translated.relative_to(plugin).as_posix(), cfg['repository'],
-                                        revision, source_routes, bool(entry.get('heading'))))
+                                        revision, source_routes, bool(entry.get('heading')), dropped))
             if table is None and legacy_record(plugin, entry['path']) is not None:
                 legacy = legacy_record(plugin, entry['path'])
                 source_records.append({'path': entry['path'], 'sourceHash': legacy.get('sourceHash'),
@@ -606,6 +638,8 @@ def plan_chinese(root, plugin, cfg, definitions, pages, old, planned, removals, 
         title = re.sub(r'\s+\[#[^\]]+\]$', '', title)
         description = (definition.get('descriptionZh') or (field(old_front, 'description') if scoped else '') or
                        field(source_front, 'description', title))
+        if cfg.get('stripLeadingTitle'):
+            body = strip_leading_title(body)
         output = document(title, description, body)
         if marker:
             output += '\n' + marker + notes
