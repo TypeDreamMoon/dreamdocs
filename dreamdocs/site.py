@@ -21,6 +21,7 @@ import subprocess
 import urllib.parse
 
 from .align import Alignment
+from . import llms
 
 NOTES = "<!-- docs-sync:notes -->"
 
@@ -42,11 +43,22 @@ def json_text(value):
 
 
 def write(path, text):
+    """Text is written UTF-8 with LF; bytes (a published plugin file) are copied as they are."""
     path = Path(path)
-    if path.exists() and read(path) == text:
+    if not differs(path, text):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8", newline="\n")
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+    else:
+        path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def differs(path, value):
+    path = Path(path)
+    if not path.exists():
+        return True
+    return path.read_bytes() != value if isinstance(value, bytes) else read(path) != value
 
 
 def within(root, name):
@@ -490,7 +502,7 @@ def sync(root, plugin, revision=None, check=False, adopt_existing=False):
             for entry in page["sources"]:
                 if not any(entry.get(key) for key in ("heading", "headingPrefix", "diagnosticPrefix")):
                     source_routes.setdefault(entry["path"], route(page["id"]))
-    planned, removals, pages = {}, [], {}
+    planned, removals, pages, english_bodies = {}, [], {}, {}
     for page in definitions:
         page_id = page["id"]
         chunks, fingerprints = [], []
@@ -525,6 +537,7 @@ def sync(root, plugin, revision=None, check=False, adopt_existing=False):
             body = body.replace(f"/blob/{revision}/", f"/blob/{page_revision}/")
             body = body.replace(f"raw.githubusercontent.com/{cfg['repository']}/{revision}/",
                                 f"raw.githubusercontent.com/{cfg['repository']}/{page_revision}/")
+        english_bodies[page_id] = body
         fmt = page.get("format", "md")
         if fmt not in ("md", "mdx"):
             raise ValueError(f"Unsupported source format: {fmt}")
@@ -555,10 +568,20 @@ def sync(root, plugin, revision=None, check=False, adopt_existing=False):
     if different_history and old.get('translationSnapshotHash', snapshot) != snapshot:
         raise ValueError('Refusing unrelated history with different Chinese documentation')
     plan_chinese(root, plugin, cfg, definitions, pages, old, planned, removals, revision, adopt_existing)
+    english = {key: value for key, value in pages.items() if value["locale"] == "en"}
+    published = llms.plan(root, plugin, cfg, english, english_bodies, source_routes, revision)
+    planned.update(published)
+    for name in old.get("published", {}):
+        # A file the site no longer publishes is removed, never left behind with stale content.
+        path = within(root, name)
+        if path not in published and path.exists():
+            removals.append(path)
     lock = {"version": 1, "repository": cfg["repository"], "revision": revision, "workingTree": dirty_sources,
             "translationSnapshotHash": snapshot, "pages": pages}
+    if published:
+        lock["published"] = llms.lock_entry(root, published)
     planned[root / "docs-sync/source-lock.json"] = json_text(lock)
-    changes = [str(p.relative_to(root)) for p, value in planned.items() if not p.exists() or read(p) != value]
+    changes = [str(p.relative_to(root)) for p, value in planned.items() if differs(p, value)]
     changes += [str(p.relative_to(root)) for p in removals]
     if not check:
         # All source, path and overwrite checks have completed before the first write.
@@ -860,6 +883,12 @@ def validate(root):
         translation = page.get('translation', {})
         if translation.get('output') and digest(split_notes(read(within(root, translation['output'])))[0].rstrip()) != translation['bodyHash']:
             raise ValueError('Generated Chinese differs from plugin snapshot: ' + page_id)
+    for name, expected in lock.get("published", {}).items():
+        path = within(root, name)
+        if not path.exists():
+            raise ValueError(f"Published file is missing: {name}")
+        if llms.file_hash(path) != expected:
+            raise ValueError(f"Published file differs from lock: {name}; edit the plugin or docs-sync/config.json instead")
     return len(lock["pages"])
 
 

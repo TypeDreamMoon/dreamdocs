@@ -62,6 +62,8 @@ def main(command: str, root: Path) -> int:
     # Both locales are generated from merged plugin documents. Notes stay site-owned;
     # sync verified the generated body before keeping them.
     allowed = {"docs-sync/source-lock.json"}
+    # llms.txt, llms-full.txt and the files a site publishes from the plugin (dreamdocs/llms.py).
+    allowed.update(lock.get("published", {}))
     allowed.update(name for name in tracked if name.startswith("docs-sync/sources/"))
     snapshots = root / "docs-sync/sources"
     if snapshots.exists():

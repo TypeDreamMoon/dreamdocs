@@ -64,6 +64,31 @@ A site keeps its page mapping in `docs-sync/config.json`, its own pages and the 
 `<!-- docs-sync:notes -->`. `dreamdocs site sync --site . --plugin <plugin checkout>` generates both locales from the
 plugin; `site validate` checks the result; `site ci event|commit-source` are its GitHub Actions steps.
 
+An `llms` block in the same file makes sync also write `public/llms.txt` (an [llmstxt.org](https://llmstxt.org)
+index of the pages a model should read), `public/llms-full.txt` (their English text in one file, links made
+absolute) and any plugin file listed under `publish`, copied into `public/` as it is:
+
+```json
+"siteUrl": "https://shader.toolchain.64hz.cn",
+"llms": {
+  "title": "DreamShader",
+  "summary": "One sentence a model reads first.",
+  "details": ["Optional paragraphs before the links."],
+  "sections": [
+    { "title": "Start here", "links": [ { "page": "cheatsheet", "note": "the language on one page" },
+                                        { "file": "diagnostics.json", "title": "Diagnostics as JSON" } ] },
+    { "title": "Optional", "links": [ { "page": "changelog/dreamshader" } ] }
+  ],
+  "full": [ "cheatsheet", { "source": ".skill/reference/dss.md", "title": "DreamShaderLang 2.0" } ],
+  "publish": { "diagnostics.json": "Docs/diagnostics/codes.json" }
+}
+```
+
+A link names a `page` id of the mapping, a published `file`, or a `url` with a `title`. `full` lists page ids or
+plugin files (`source`); left out, it is every page linked outside the `Optional` section. A published JSON file's
+`doc` links into the site must name pages the site has, or sync stops. The lock records each file's hash, so
+`site validate` refuses a hand edit; drop the block and the next sync removes the files.
+
 ## Translators
 
 Profiles are read from DreamLoc's personal file, `%APPDATA%\DreamLoc\translators.ini`
